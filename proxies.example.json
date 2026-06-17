@@ -1,0 +1,13 @@
+[
+  {
+    "_comment": "=== HTTP 代理配置说明 ===",
+    "_comment2": "如果你使用 VPN 全局/TUN 模式（Clash TUN、WireGuard 等），",
+    "_comment3": "流量已在系统层面路由，不需要 HTTP 代理。无需创建 proxies.json。",
+    "_comment4": "HTTP 代理仅在你需要通过特定端口转发时使用（如 Clash 非 TUN 模式）。",
+    "_comment5": "复制此文件为 proxies.json 后，请删除所有 _comment 开头的字段。",
+    "_comment6": "",
+    "server": "http://127.0.0.1:7890",
+    "username": "",
+    "password": ""
+  }
+]

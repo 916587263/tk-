@@ -1,0 +1,15 @@
+﻿# TikTok 竞争对手分析系统 - .gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.db
+data/
+checkpoints/*.db
+logs/*.log
+cookies/
+browser_profile/
+proxies.json
+.env
+.venv/
+*.egg-info/
+dist/
