@@ -17,6 +17,11 @@ from tiktok_analyzer.exporter import export_csv, export_markdown
 from tiktok_analyzer.checkpoint import CheckpointManager
 from tiktok_analyzer.proxy_pool import ProxyPool
 from tiktok_analyzer.logger import setup_logger
+from tiktok_analyzer.account_filter import AccountFilter, AccountFilterConfig
+from tiktok_analyzer.account_scorer import AccountScorer, AccountScorerConfig
+from tiktok_analyzer.video_scorer import VideoScorer, VideoFilter, VideoScorerConfig, VideoFilterConfig
+from tiktok_analyzer.intent_detector import IntentDetector, IntentDetectorConfig
+from tiktok_analyzer.viral_detector import ViralDetector, ViralDetectorConfig
 
 app = Flask(__name__)
 app.secret_key = "tiktok-analyzer-secret-key-2024"
@@ -25,6 +30,25 @@ logger = setup_logger("webapp")
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 USER_DATA_DIR = BASE_DIR / "browser_profile"
+CONFIG_FILE = BASE_DIR / "config.yaml"
+
+
+def _load_config() -> dict:
+    """加载 YAML 配置，不存在则返回空 dict（使用各模块默认值）"""
+    try:
+        import yaml
+    except ImportError:
+        logger.warning("PyYAML 未安装 (pip install pyyaml)，使用默认配置")
+        return {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+            logger.info("已加载配置: %s", CONFIG_FILE)
+            return data
+    logger.info("配置文件不存在 (%s)，使用默认配置", CONFIG_FILE)
+    return {}
+
+APP_CONFIG = _load_config()
 
 # 活跃任务
 _active_tasks: dict[str, dict] = {}
@@ -82,7 +106,8 @@ def start_analysis():
     params = (task_id, keywords, region, accounts_per_keyword,
               videos_per_account, comments_per_video,
               browser, headless, cdp_port,
-              openai_key, openai_base_url, openai_model, use_ai)
+              openai_key, openai_base_url, openai_model, use_ai,
+              APP_CONFIG)
 
     thread = threading.Thread(target=_run_analysis, args=params, daemon=True)
     thread.start()
@@ -93,7 +118,9 @@ def start_analysis():
 def _run_analysis(task_id, keywords, region, accounts_per_keyword,
                   videos_per_account, comments_per_video,
                   browser, headless, cdp_port,
-                  openai_key, openai_base_url, openai_model, use_ai):
+                  openai_key, openai_base_url, openai_model, use_ai,
+                  config=None):
+    cfg = config or {}
     """后台分析任务"""
     pq = _progress_queues.get(task_id)
     if not pq:
@@ -145,17 +172,160 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
             return
 
         emit("开始采集数据...")
+        enrich_top = cfg.get("video_scraping", {}).get("enrich_top", 0)
         scraped_data = loop.run_until_complete(scraper.run_analysis(
             keywords=keywords, region=region,
             accounts_per_keyword=accounts_per_keyword,
             videos_per_account=videos_per_account,
             comments_per_video=comments_per_video,
             comments_video_count=3,
+            enrich_top=enrich_top,
         ))
 
         _active_tasks[task_id]["scraped_data"] = scraped_data
 
-        # AI 分析（支持代理）
+        # ═══════════════════════════════════════════════════════════
+        # P0-P5: 过滤 + 评分 + 意图识别
+        # ═══════════════════════════════════════════════════════════
+
+        all_accounts = scraped_data.get("accounts", [])
+        all_videos = scraped_data.get("videos", [])
+        all_comments = scraped_data.get("comments", [])
+
+        # ── P0: 账号过滤 ──
+        af_cfg_dict = cfg.get("account_filter", {})
+        af_cfg = AccountFilterConfig(**af_cfg_dict)
+        if af_cfg.enabled:
+            emit(f"🔍 账号过滤启动 (条件: min_followers={af_cfg.min_followers}, "
+                 f"verified={af_cfg.require_verified}, region_wl={af_cfg.region_whitelist})...")
+            account_filter = AccountFilter(af_cfg)
+            before_af = len(all_accounts)
+            all_accounts, filtered_accounts = account_filter.filter(all_accounts)
+            if filtered_accounts:
+                emit(f"账号过滤: {before_af} → {len(all_accounts)} "
+                     f"(过滤 {len(filtered_accounts)} 个)")
+                logger.info("过滤原因分布: %s", account_filter.stats.get("reasons", {}))
+                # 同步过滤视频和评论
+                kept_usernames = {a.get("username", "") for a in all_accounts}
+                all_videos = [v for v in all_videos
+                              if v.get("account_username", "") in kept_usernames]
+                all_comments = [c for c in all_comments
+                                if c.get("account_username", "") in kept_usernames]
+
+        # ── P1: 账号评分 ──
+        as_cfg_dict = cfg.get("account_scorer", {})
+        as_cfg = AccountScorerConfig(**as_cfg_dict)
+        if as_cfg.enabled and all_accounts:
+            account_scorer = AccountScorer(as_cfg)
+            all_accounts = account_scorer.score_all(all_accounts)
+            tiers = {}
+            for a in all_accounts:
+                tiers[a.get("tier", "?")] = tiers.get(a.get("tier", "?"), 0) + 1
+            top3 = [(a.get("username"), a.get("score")) for a in all_accounts[:3]]
+            emit(f"📊 账号评分完成: {tiers} | Top3: {top3}")
+
+        # ── P3: 视频过滤 ──
+        vf_cfg_dict = cfg.get("video_filter", {})
+        vf_cfg = VideoFilterConfig(**vf_cfg_dict)
+        if vf_cfg.enabled and all_videos:
+            video_filter = VideoFilter(vf_cfg)
+            before_vf = len(all_videos)
+            all_videos, _ = video_filter.filter(all_videos)
+            emit(f"🔍 视频过滤: {before_vf} → {len(all_videos)}")
+
+        # ── P3: 视频评分 ──
+        vs_cfg_dict = cfg.get("video_scorer", {})
+        vs_cfg = VideoScorerConfig(**vs_cfg_dict)
+        if vs_cfg.enabled and all_videos:
+            video_scorer = VideoScorer(vs_cfg)
+            all_videos = video_scorer.score_all(all_videos)
+            tiers = {}
+            for v in all_videos:
+                tiers[v.get("tier", "?")] = tiers.get(v.get("tier", "?"), 0) + 1
+            emit(f"📊 视频评分完成: {tiers}")
+
+            # 按账号聚合视频统计
+            account_video_stats = video_scorer.aggregate_by_account(all_videos)
+            # 将聚合统计合并到对应 account
+            for acc in all_accounts:
+                uname = acc.get("username", "")
+                if uname in account_video_stats:
+                    acc["video_stats"] = account_video_stats[uname]
+
+        # ── 爆款视频发现 ──
+        vd_cfg_dict = cfg.get("viral_detector", {})
+        vd_cfg = ViralDetectorConfig(**vd_cfg_dict)
+        if vd_cfg.enabled and all_videos:
+            emit("🔥 正在识别爆款视频...")
+            viral_detector = ViralDetector(vd_cfg)
+            viral_data = viral_detector.analyze(all_videos, all_accounts)
+
+            # 将 viral_profile 合并到对应 account
+            for acc in all_accounts:
+                uname = acc.get("username", "")
+                if uname in viral_data["per_account"]:
+                    acc["viral_profile"] = viral_data["per_account"][uname]
+
+            _active_tasks[task_id]["viral_data"] = viral_data
+
+            # 输出 Top 摘要
+            top_list = viral_data["top_viral_videos"]
+            if top_list:
+                summaries = []
+                for i, v in enumerate(top_list[:5]):
+                    er = v.get("_engagement_rate", 0)
+                    summaries.append(
+                        f"#{i+1} @{v.get('account_username','')}: "
+                        f"互动率{er:.1%}"
+                    )
+                emit(f"🔥 爆款 Top {len(top_list)}: {' | '.join(summaries)}")
+            emit(f"📊 全局基准: 平均互动率 {viral_data['global_benchmarks'].get('avg_engagement_rate', 0):.1%}, "
+                 f"爆款占比 {viral_data['global_benchmarks'].get('viral_ratio', 0):.0%}")
+
+            # 特征摘要
+            chars = viral_data.get("viral_characteristics", {})
+            if chars.get("common_tags"):
+                top_tags = [t["tag"] for t in chars["common_tags"][:5]]
+                emit(f"🧬 爆款高频标签: {', '.join(['#'+t for t in top_tags])}")
+            if chars.get("optimal_duration_range"):
+                dr = chars["optimal_duration_range"]
+                emit(f"⏱ 爆款最优时长: {dr[0]}s - {dr[1]}s")
+
+        # ── P5: 商业意图识别 ──
+        intent_data = None
+        intent_cfg_dict = cfg.get("intent_detector", {})
+        intent_cfg = IntentDetectorConfig(**intent_cfg_dict)
+        if intent_cfg.enabled and all_comments:
+            emit("🧠 正在识别评论商业意图...")
+            intent_detector = IntentDetector(intent_cfg)
+            intent_data = intent_detector.analyze_comments(all_comments)
+            all_comments = intent_data["comments"]  # 已被原地修改
+            insights = intent_detector.get_insights(intent_data)
+            emit(f"意图识别: {intent_data['summary']['comments_with_intent']}/"
+                 f"{intent_data['summary']['total_comments']} 条评论含商业意图 "
+                 f"({intent_data['summary']['intent_rate']:.0%})")
+            if insights:
+                for insight in insights:
+                    emit(f"  {insight}")
+            _active_tasks[task_id]["intent_data"] = intent_data
+
+        # 更新 scraped_data
+        scraped_data["accounts"] = all_accounts
+        scraped_data["videos"] = all_videos
+        scraped_data["comments"] = all_comments
+        scraped_data["total_accounts"] = len(all_accounts)
+        scraped_data["total_videos"] = len(all_videos)
+        scraped_data["total_comments"] = len(all_comments)
+
+        # 注入爆款特征到 scraped_data（供导出使用）
+        if _active_tasks[task_id].get("viral_data"):
+            vd = _active_tasks[task_id]["viral_data"]
+            scraped_data["viral_characteristics"] = vd.get("viral_characteristics", {})
+            scraped_data["global_benchmarks"] = vd.get("global_benchmarks", {})
+
+        # ═══════════════════════════════════════════════════════════
+        # P6: AI 分析（传入评分和意图数据增强分析质量）
+        # ═══════════════════════════════════════════════════════════
         analysis_data = None
         if use_ai and openai_key:
             emit("正在进行 AI 分析...")
@@ -169,7 +339,22 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
                     model=openai_model,
                     proxy=openai_proxy,
                 )
-                analysis_data = loop.run_until_complete(analyzer.analyze(scraped_data))
+
+                # P6: 使用增强分析（如果启用了评分/意图识别则传入补充数据）
+                ai_cfg = cfg.get("ai_analysis", {})
+                use_scored = ai_cfg.get("use_scored_data", True)
+                use_intent = ai_cfg.get("use_intent_data", True)
+
+                if use_scored and (any(a.get("score") is not None for a in all_accounts)):
+                    analysis_data = loop.run_until_complete(
+                        analyzer.analyze_enhanced(
+                            scraped_data,
+                            intent_data=intent_data if use_intent else None,
+                            config=ai_cfg,
+                        )
+                    )
+                else:
+                    analysis_data = loop.run_until_complete(analyzer.analyze(scraped_data))
                 _active_tasks[task_id]["analysis_data"] = analysis_data
                 emit("AI 分析完成", {"analysis": analysis_data})
             except Exception as e:

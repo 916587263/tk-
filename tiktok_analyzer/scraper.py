@@ -927,6 +927,8 @@ class TikTokScraper:
                         "like_count": stats.get("heartCount", stats.get("heart", 0)),
                         "bio": user_data.get("signature", ""),
                         "region": user_data.get("region", ""),
+                        "language": user_data.get("language", ""),
+                        "location": user_data.get("location", ""),
                         "sec_uid": user_data.get("secUid", ""),
                         "uid": user_data.get("id", ""),
                         "url": url,
@@ -994,8 +996,17 @@ class TikTokScraper:
 
     # ───────────────────── 提取视频列表 ─────────────────────
 
-    async def extract_videos(self, username: str, max_videos: int = 30) -> list[dict]:
-        """提取账号最近 N 条视频信息，返回列表（限流时可能返回空列表）"""
+    async def extract_videos(
+        self, username: str, max_videos: int = 30,
+        enrich_top: int = 0  # P2: 深度补充前 N 条视频的互动数据（0=跳过）
+    ) -> list[dict]:
+        """提取账号最近 N 条视频信息，返回列表（限流时可能返回空列表）
+
+        Args:
+            username: TikTok 用户名
+            max_videos: 最多提取视频数
+            enrich_top: 对前 N 条视频调用 extract_video_detail 获取精确互动数据（0=跳过）
+        """
         username = username.strip().lstrip("@")
 
         await self._emit_progress(f"正在提取视频: @{username} (目标 {max_videos} 条)")
@@ -1018,39 +1029,82 @@ class TikTokScraper:
             if not await self.handle_captcha_if_needed():
                 return []
 
-            # 滚动触发懒加载
-            await self._page.evaluate("window.scrollBy(0, 800)")
-            await asyncio.sleep(2)
+            # P2 增强: 优先从 SIGI_STATE 提取（精度最高，含互动数据）
+            sigi_videos = await self._extract_videos_from_sigi(username)
+            if sigi_videos:
+                logger.info("@%s: SIGI 提取了 %d 条视频", username, len(sigi_videos))
+                # SIGI 数据已包含精确指标，直接返回
+                await self._emit_progress(
+                    f"视频提取完成: @{username} ({len(sigi_videos[:max_videos])} 条, SIGI 精确数据)"
+                )
+                videos = sigi_videos[:max_videos]
+            else:
+                # 滚动触发懒加载
+                await self._page.evaluate("window.scrollBy(0, 800)")
+                await asyncio.sleep(2)
 
-            # 卡片计数
-            card_count = await self._page.locator('[data-e2e=\"user-post-item\"]').count()
-            logger.debug("视频卡片数: %d", card_count)
+                # 卡片计数
+                card_count = await self._page.locator('[data-e2e=\"user-post-item\"]').count()
+                logger.debug("视频卡片数: %d", card_count)
 
-            videos = []
-            scroll_count = 0
-            max_scrolls = min((max_videos // 3) + 3, 10)
-            seen_ids = set()
+                videos = []
+                scroll_count = 0
+                max_scrolls = min((max_videos // 3) + 3, 10)
+                seen_ids = set()
 
-            while len(videos) < max_videos and scroll_count < max_scrolls:
-                new_videos = await self._extract_videos_from_page(username)
-                for v in new_videos:
-                    vid = v.get("id", v.get("url", ""))
-                    if vid and vid not in seen_ids:
-                        seen_ids.add(vid)
-                        videos.append(v)
+                while len(videos) < max_videos and scroll_count < max_scrolls:
+                    new_videos = await self._extract_videos_from_page(username)
+                    for v in new_videos:
+                        vid = v.get("id", v.get("url", ""))
+                        if vid and vid not in seen_ids:
+                            seen_ids.add(vid)
+                            videos.append(v)
 
-                if len(videos) >= max_videos:
-                    break
+                    if len(videos) >= max_videos:
+                        break
 
-                await self._page.evaluate("window.scrollBy(0, 1000)")
-                await self._sleep_with_jitter()
-                scroll_count += 1
+                    await self._page.evaluate("window.scrollBy(0, 1000)")
+                    await self._sleep_with_jitter()
+                    scroll_count += 1
 
-                if not await self.handle_captcha_if_needed():
-                    break
+                    if not await self.handle_captcha_if_needed():
+                        break
 
-            logger.info("@%s: 提取了 %d 条视频", username, len(videos[:max_videos]))
-            return videos[:max_videos]
+                videos = videos[:max_videos]
+
+            # P2 增强: 按点赞数排序，仅对 Top N 进入详情页补充互动数据
+            if enrich_top > 0 and videos:
+                # 按 digg_count 降序排列，取前 N 条最有价值的视频进入详情页
+                sorted_by_likes = sorted(
+                    videos,
+                    key=lambda x: x.get("digg_count", 0) or 0,
+                    reverse=True
+                )
+                enrich_count = min(enrich_top, len(sorted_by_likes))
+                await self._emit_progress(
+                    f"深度补充互动数据: @{username} 点赞 Top {enrich_count} 条视频..."
+                )
+                for i in range(enrich_count):
+                    v = sorted_by_likes[i]
+                    vid = v.get("id", "")
+                    if not vid:
+                        continue
+                    detail = await self.extract_video_detail(username, vid)
+                    if detail:
+                        # merge: 详情页数据覆盖列表页（更精确）
+                        for key in ("play_count", "digg_count", "comment_count",
+                                     "share_count", "create_time", "duration",
+                                     "desc", "tags", "music"):
+                            if key in detail and detail[key]:
+                                v[key] = detail[key]
+                        logger.debug(
+                            "  点赞 #%d (digg=%s): plays=%s, comments=%s",
+                            i+1, v.get("digg_count"), v.get("play_count"), v.get("comment_count")
+                        )
+                    await self._sleep_with_jitter()
+
+            logger.info("@%s: 提取了 %d 条视频", username, len(videos))
+            return videos
         finally:
             # 关闭视频页，恢复旧页面
             try:
@@ -1059,8 +1113,61 @@ class TikTokScraper:
                 pass
             self._page = old_page
 
+    async def _extract_videos_from_sigi(self, username: str) -> list[dict]:
+        """从 SIGI_STATE 提取视频列表（精度最高）"""
+        videos = []
+        try:
+            sigi = await self._page.evaluate("() => window.SIGI_STATE || null")
+            if not sigi:
+                return videos
+            if isinstance(sigi, str):
+                sigi = json.loads(sigi)
+
+            # TikTok 用户页 SIGI_STATE 结构: UserPage.items 或 ItemList.user-post
+            items = None
+            if "UserPage" in sigi:
+                items = sigi["UserPage"].get("items", [])
+            if not items and "ItemList" in sigi:
+                items = sigi["ItemList"].get("user-post", {}).get("list", [])
+
+            if not items:
+                return videos
+
+            for item in items:
+                try:
+                    vid = item.get("id", "")
+                    if not vid:
+                        continue
+
+                    # 视频信息可能在 item 顶层或 video 子对象
+                    video_info = item.get("video", item)
+                    stats = item.get("stats", item)
+
+                    videos.append({
+                        "id": vid,
+                        "desc": (item.get("desc") or "").strip(),
+                        "create_time": item.get("createTime", 0),
+                        "duration": video_info.get("duration", 0),
+                        "play_count": stats.get("playCount", 0),
+                        "digg_count": stats.get("diggCount", 0),
+                        "comment_count": stats.get("commentCount", 0),
+                        "share_count": stats.get("shareCount", 0),
+                        "url": f"{TIKTOK_URL}/@{username}/video/{vid}",
+                        "tags": [],
+                        "music": item.get("music", {}).get("title", "") if isinstance(item.get("music"), dict) else "",
+                    })
+                except Exception:
+                    continue
+
+            if videos:
+                logger.debug("SIGI: 提取了 %d 条视频 (UserPage items)", len(videos))
+        except Exception as e:
+            logger.debug("SIGI 视频提取失败: %s", e)
+
+        return videos
+
     async def _extract_videos_from_page(self, username: str) -> list[dict]:
-        """从当前用户页提取视频列表（新 TikTok UI DOM 提取）"""
+        """从当前用户页提取视频列表（新 TikTok UI DOM 提取，增强版）"""
         import re
         videos = []
         try:
@@ -1087,15 +1194,28 @@ class TikTokScraper:
                     if await img.count() > 0:
                         desc = (await img.first.get_attribute("alt")) or ""
 
-                    # 提取标签
+                    # 提取标签（从描述中）
                     tags = re.findall(r"#(\w+)", desc) if desc else []
 
-                    # 播放/点赞数
-                    # 卡片文本中纯数字即为播放量
+                    # 解析卡片文本中的数字来推断播放/互动数据
+                    # TikTok 视频卡片文本格式: "<播放量>\n<点赞数>❤️\n<评论数>💬"
+                    numbers = re.findall(r"([\d.,]+[KkMmBb]?万?米?)", text)
                     play_count = 0
-                    num_match = re.search(r"^(\d+)$", text, re.MULTILINE)
-                    if num_match:
-                        play_count = int(num_match.group(1))
+                    digg_count = 0
+                    comment_count = 0
+
+                    # 第一个数字通常是播放量
+                    if numbers:
+                        play_count = _parse_count(numbers[0])
+
+                    # 查找点赞/评论（通过 emoji 辅助识别）
+                    digg_match = re.search(r"([\d.,]+[KkMmBb]?万?米?)\s*[❤👍💗]", text)
+                    if digg_match:
+                        digg_count = _parse_count(digg_match.group(1))
+
+                    comment_match = re.search(r"([\d.,]+[KkMmBb]?万?米?)\s*[💬🗨]", text)
+                    if comment_match:
+                        comment_count = _parse_count(comment_match.group(1))
 
                     if vid:
                         videos.append({
@@ -1104,11 +1224,12 @@ class TikTokScraper:
                             "create_time": 0,
                             "duration": 0,
                             "play_count": play_count,
-                            "digg_count": 0,
-                            "comment_count": 0,
+                            "digg_count": digg_count,
+                            "comment_count": comment_count,
                             "share_count": 0,
                             "url": url,
                             "tags": tags,
+                            "music": "",
                         })
                 except Exception:
                     continue
@@ -1129,7 +1250,7 @@ class TikTokScraper:
                                 "id": vid, "desc": "", "create_time": 0,
                                 "duration": 0, "play_count": 0, "digg_count": 0,
                                 "comment_count": 0, "share_count": 0,
-                                "url": url, "tags": [],
+                                "url": url, "tags": [], "music": "",
                             })
                     except Exception:
                         continue
@@ -1139,10 +1260,360 @@ class TikTokScraper:
 
         return videos
 
+    async def extract_video_detail(self, username: str, video_id: str) -> Optional[dict]:
+        """访问单个视频详情页，提取精确的互动数据 + 标签 + 音乐
+
+        用于补充列表页缺失的 engagement 指标（digg/comment/share）。
+        返回增量 dict，调用方应 merge 到已有 video dict。
+        """
+        ck_key = f"video_detail:{video_id}"
+        if self.checkpoint and self.checkpoint.is_completed("video_detail", ck_key):
+            cached = self.checkpoint.get_scraped_data("video_detail", ck_key)
+            if cached:
+                return cached
+
+        url = TIKTOK_VIDEO_URL.format(username=username, video_id=video_id)
+        try:
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2)
+
+            if await self._is_rate_limited():
+                logger.debug("视频详情页限流: %s", video_id)
+                return None
+
+            detail = {}
+
+            # 方法1: SIGI_STATE 提取（最准确）
+            sigi = await self._page.evaluate("() => window.SIGI_STATE || null")
+            if sigi:
+                if isinstance(sigi, str):
+                    sigi = json.loads(sigi)
+
+                # ItemModule: 视频详情页主数据
+                item_data = None
+                if "ItemModule" in sigi and video_id in sigi["ItemModule"]:
+                    item_data = sigi["ItemModule"][video_id]
+                elif "ItemList" in sigi:
+                    item_data = sigi["ItemList"].get(video_id, None)
+
+                if item_data:
+                    stats = item_data.get("stats", item_data)
+                    detail.update({
+                        "play_count": stats.get("playCount", 0),
+                        "digg_count": stats.get("diggCount", 0),
+                        "comment_count": stats.get("commentCount", 0),
+                        "share_count": stats.get("shareCount", 0),
+                        "create_time": item_data.get("createTime", 0),
+                        "duration": (item_data.get("video", {}) or {}).get("duration", 0)
+                                      if isinstance(item_data.get("video"), dict) else 0,
+                        "desc": item_data.get("desc", ""),
+                        "music": (item_data.get("music", {}) or {}).get("title", "")
+                                 if isinstance(item_data.get("music"), dict) else "",
+                    })
+                    # 标签
+                    text_extra = item_data.get("textExtra", [])
+                    if text_extra:
+                        detail["tags"] = [
+                            t.get("hashtagName", "").lstrip("#")
+                            for t in text_extra
+                            if t.get("hashtagName")
+                        ]
+
+            # 方法2: DOM 提取（fallback）
+            if not detail:
+                detail = await self._extract_video_detail_from_dom()
+
+            # 保存 checkpoint
+            if detail and self.checkpoint:
+                self.checkpoint.mark_scraped("video_detail", ck_key, detail)
+
+            return detail
+
+        except Exception as e:
+            logger.error("提取视频详情失败 %s: %s", video_id, e)
+            return None
+
+    async def _extract_video_detail_from_dom(self) -> dict:
+        """从视频详情页 DOM 提取互动数据（SIGI 失败时的 fallback）"""
+        import re
+        detail = {}
+        try:
+            # 从页面 meta 标签提取
+            # <meta data-react-helmet="true" name="description" content="...">
+            meta_desc = self._page.locator('meta[name="description"]')
+            if await meta_desc.count() > 0:
+                content = (await meta_desc.first.get_attribute("content")) or ""
+                # 格式: "Likes (123), Comments (45), Shares (67)"
+                likes_m = re.search(r"(\d[\d,.]*[KkMm]?)\s*Likes?", content)
+                comments_m = re.search(r"(\d[\d,.]*[KkMm]?)\s*Comments?", content)
+                if likes_m:
+                    detail["digg_count"] = _parse_count(likes_m.group(1))
+                if comments_m:
+                    detail["comment_count"] = _parse_count(comments_m.group(1))
+
+            # 提取 strong 标签中的互动数
+            strong_els = self._page.locator("strong")
+            strong_count = await strong_els.count()
+            numbers = []
+            for i in range(min(strong_count, 10)):
+                try:
+                    text = (await strong_els.nth(i).inner_text()).strip()
+                    if re.match(r"[\d.,]+[KkMmBb]?万?米?", text):
+                        numbers.append(_parse_count(text))
+                except Exception:
+                    pass
+            # TikTok 视频页: [点赞, 评论, 收藏, 分享, ...]
+            if len(numbers) >= 4:
+                if "digg_count" not in detail:
+                    detail["digg_count"] = numbers[0]
+                if "comment_count" not in detail:
+                    detail["comment_count"] = numbers[1]
+                if "share_count" not in detail:
+                    detail["share_count"] = numbers[3]  # 跳过收藏(2)
+            elif len(numbers) >= 2:
+                if "digg_count" not in detail:
+                    detail["digg_count"] = numbers[0]
+                if "comment_count" not in detail:
+                    detail["comment_count"] = numbers[1]
+
+        except Exception as e:
+            logger.debug("DOM 视频详情提取失败: %s", e)
+
+        return detail
+
     # ───────────────────── 提取评论 ─────────────────────
 
+    async def _extract_comments_via_network(
+        self, video_id: str, max_comments: int = 200
+    ) -> list[dict]:
+        """P0 修复: 通过浏览器 fetch 直接调用 TikTok comment/list API
+
+        在 CDP 模式下 TikTok 通过 JS 动态渲染评论，DOM 提取始终为 0。
+        此方法利用浏览器原生 fetch（自动携带 Cookie），直接分页调用
+        TikTok 评论 API (/api/comment/list/)，完全绕过 DOM。
+
+        反检测设计:
+        - 请求间隔: random.uniform(0.8, 1.5s)，模拟人类阅读停顿
+        - 429 退避: 指数退避 + 自动恢复，最多 max_backoff 级
+        - 同源 fetch: Sec-Fetch-* 头部与正常页面 XHR 一致
+        - Cookie 继承: credentials: 'include'，sessionid 自动携带
+
+        工作流程:
+        1. 在页面上下文中执行 fetch() 调用 comment/list API
+        2. 使用 cursor 分页，每次请求 50 条
+        3. 429 时退避重试，403/401 时告警并退出
+        4. 去重后返回
+
+        优势:
+        - 不依赖 DOM 渲染/滚动/按钮点击
+        - 浏览器 Cookie 自动携带（反爬友好）
+        - cursor 分页比滚动触发更可靠、更可控
+        """
+        comments: list[dict] = []
+        seen_cids: set[str] = set()
+        cursor = 0
+        max_pages = max(max_comments // 50, 1) + 5
+        consecutive_empty = 0
+        api_total = 0  # API 返回的总评论数（首页获取）
+
+        for page in range(max_pages):
+            if len(comments) >= max_comments:
+                break
+            if consecutive_empty >= 3:
+                break
+
+            # 在浏览器中直接 fetch TikTok 评论 API
+            result = await self._page.evaluate(
+                """
+                async ([aweme_id, cursor_val, count]) => {
+                    const url = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${aweme_id}&cursor=${cursor_val}&count=${count}`;
+                    try {
+                        const resp = await fetch(url, { credentials: 'include' });
+                        if (!resp.ok) {
+                            return {
+                                error: 'HTTP ' + resp.status,
+                                http_status: resp.status,
+                                comments: []
+                            };
+                        }
+                        const data = await resp.json();
+                        return {
+                            comments: data.comments || [],
+                            has_more: data.has_more || false,
+                            cursor: data.cursor || 0,
+                            total: data.total || 0,
+                        };
+                    } catch (err) {
+                        return { error: err.message, comments: [] };
+                    }
+                }
+                """,
+                [video_id, cursor, 50],
+            )
+
+            # 处理 API 错误
+            if not result:
+                logger.warning("comment/list API 第 %d 页无响应", page + 1)
+                break
+
+            http_status = result.get("http_status", 0)
+
+            if http_status == 429:
+                # 触发退避
+                logger.warning("comment/list API 429 限流，触发退避...")
+                self._backoff_level = min(self._backoff_level + 1, self._max_backoff)
+                delay = self._random_delay()
+                logger.info("退避等待 %.1fs (级别 %d)", delay, self._backoff_level)
+                await asyncio.sleep(delay)
+                if self._backoff_level >= self._max_backoff:
+                    break
+                continue  # 重试当前页
+
+            if http_status in (403, 401):
+                logger.warning(
+                    "comment/list API 返回 %d — 可能需要 msToken/webId 签名升级",
+                    http_status
+                )
+                break
+
+            if result.get("error") and http_status != 429:
+                logger.warning(
+                    "comment/list API 第 %d 页失败: %s",
+                    page + 1, result.get("error")
+                )
+                break
+
+            batch = result.get("comments", [])
+            if not batch:
+                consecutive_empty += 1
+                if not result.get("has_more"):
+                    break
+                cursor = result.get("cursor", cursor + 50)
+                continue
+
+            # 成功拿到评论，重置退避级别
+            if self._backoff_level > 0:
+                self._backoff_level = max(0, self._backoff_level - 1)
+
+            # 记录 API 总评论数（用于日志对比）
+            if api_total == 0:
+                api_total = result.get("total", 0)
+
+            consecutive_empty = 0
+            for c in batch:
+                cid = c.get("cid", "") or c.get("comment_id", "") or c.get("id", "")
+                if not cid or cid in seen_cids:
+                    continue
+                seen_cids.add(cid)
+
+                user = c.get("user", {}) or {}
+                comments.append({
+                    "video_id": video_id,
+                    "text": c.get("text", ""),
+                    "username": (
+                        user.get("unique_id", "")
+                        or user.get("uniqueId", "")
+                        or user.get("uid", "")
+                    ),
+                    "likes": c.get("digg_count", 0) or c.get("like_count", 0),
+                    "time": c.get("create_time", "") or c.get("createTime", ""),
+                })
+
+            # 下一页
+            cursor = result.get("cursor", cursor + 50)
+            if not result.get("has_more"):
+                break
+
+            # API 请求间隔（带随机抖动，模拟人类阅读评论的自然停顿）
+            await asyncio.sleep(random.uniform(0.8, 1.5))
+
+        logger.info(
+            "API直调: 视频 %s 提取了 %d/%d 条评论 (%d 页)",
+            video_id, len(comments), api_total, page + 1
+        )
+        return comments[:max_comments]
+
+    async def _extract_comments_via_response_intercept(
+        self, video_id: str, max_comments: int = 200
+    ) -> list[dict]:
+        """P0 修复: 通过 page.on("response") 被动拦截 TikTok 自身的 XHR 响应
+
+        在 CDP 模式下，TikTok 页面会自动请求 comment/list API 加载评论。
+        此方法被动监听浏览器网络响应并提取评论 JSON，完全不需要自己构造
+        API 请求，因此绕过了签名/CORS/CSP/msToken 等所有问题。
+
+        相比 fetch-based 方式的优势:
+        - 浏览器自身发起的请求，自动携带所有签名/headers/Cookie
+        - 无 CORS/CSP 策略限制
+        - 不需要主动构造 API URL 或 cursor 参数
+
+        工作流程:
+        1. 由调用方在 page.goto() 之前注册 page.on("response") 监听器
+        2. 本方法等待页面加载 + 滚动以触发评论 API 请求
+        3. 从调用方传入的 captured_responses 列表中提取评论数据
+        """
+        comments: list[dict] = []
+        seen_cids: set[str] = set()
+        captured: list[dict] = []  # 由 extract_comments 注入
+
+        # 等待 TikTok 页面自行加载评论（页面加载后 3-8 秒内通常发出 API 请求）
+        await asyncio.sleep(3)
+
+        # 滚动触发更多评论加载（TikTok 按需加载评论）
+        for _ in range(5):
+            try:
+                await self._page.evaluate("window.scrollBy(0, 600)")
+                await asyncio.sleep(1.0 + random.random() * 0.5)
+            except Exception:
+                break
+
+        # 额外等待，确保异步请求完成
+        await asyncio.sleep(1)
+
+        # 使用外部传入的 captured_responses
+        captured = getattr(self, "_captured_comment_responses", [])
+        if not captured:
+            logger.info("响应拦截: 视频 %s 未捕获到任何 comment/list 响应", video_id)
+            return []
+
+        # 处理所有拦截到的响应
+        for data in captured:
+            batch = data.get("comments", [])
+            for c in batch:
+                cid = c.get("cid", "") or c.get("comment_id", "") or c.get("id", "")
+                if not cid or cid in seen_cids:
+                    continue
+                seen_cids.add(cid)
+                user = c.get("user", {}) or {}
+                comments.append({
+                    "video_id": video_id,
+                    "text": c.get("text", ""),
+                    "username": (
+                        user.get("unique_id", "")
+                        or user.get("uniqueId", "")
+                        or user.get("uid", "")
+                    ),
+                    "likes": c.get("digg_count", 0) or c.get("like_count", 0),
+                    "time": c.get("create_time", "") or c.get("createTime", ""),
+                })
+
+        logger.info(
+            "响应拦截: 视频 %s 捕获 %d 个 API 响应, 提取 %d 条评论",
+            video_id, len(captured), len(comments)
+        )
+        return comments[:max_comments]
+
     async def extract_comments(self, username: str, video_id: str, max_comments: int = 200) -> list[dict]:
-        """提取单条视频的评论，返回列表（限流时可能返回空列表）"""
+        """提取单条视频的评论，返回列表（限流时可能返回空列表）
+
+        提取策略（按优先级，逐级 fallback）:
+        0. 响应拦截: page.on("response") 监听浏览器自身的 XHR
+           — CDP 模式首选，被动拦截，无签名/跨域问题
+        1. API 直调: 浏览器内 fetch() 直接调用 comment/list，cursor 分页
+           — fallback，主动分页获取更多评论
+        2. JS 全局状态: 从 __UNIVERSAL_DATA_FOR_REHYDRATION__ / SIGI_STATE 提取
+        3. DOM 提取: 传统 DOM 解析（非 CDP 模式最后手段）
+        """
         ck_key = f"comments:{video_id}"
 
         if self.checkpoint and self.checkpoint.is_completed("comments", ck_key):
@@ -1153,27 +1624,136 @@ class TikTokScraper:
         await self._emit_progress(f"正在提取评论: {video_id}")
 
         url = TIKTOK_VIDEO_URL.format(username=username, video_id=video_id)
-        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(3)
 
-        if await self._is_rate_limited():
-            if not await self._handle_rate_limit():
-                logger.warning("限流耗尽，跳过评论提取: %s", video_id)
-                return []
+        # ── 策略0: 响应拦截（CDP 模式首选，导航前注册监听器）──
+        self._captured_comment_responses: list[dict] = []
+
+        async def _on_comment_response(response):
+            try:
+                if "/api/comment/list/" in response.url and response.ok:
+                    data = await response.json()
+                    self._captured_comment_responses.append(data)
+            except Exception:
+                pass
+
+        self._page.on("response", _on_comment_response)
+
+        try:
             await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(3)
 
-        if not await self.handle_captcha_if_needed():
-            return []
+            if await self._is_rate_limited():
+                if not await self._handle_rate_limit():
+                    logger.warning("限流耗尽，跳过评论提取: %s", video_id)
+                    return []
+                await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+            if not await self.handle_captcha_if_needed():
+                return []
+
+            # 使用响应拦截提取评论
+            intercept_comments = await self._extract_comments_via_response_intercept(video_id, max_comments)
+            if intercept_comments:
+                logger.info("响应拦截: 提取了 %d 条评论", len(intercept_comments))
+                if self.checkpoint:
+                    self.checkpoint.mark_scraped("comments", ck_key, {"comments": intercept_comments})
+                return intercept_comments[:max_comments]
+        finally:
+            # 清理监听器
+            try:
+                self._page.remove_listener("response", _on_comment_response)
+            except Exception:
+                pass
+
+        # ── 策略1: 直接调用 comment/list API（fallback: 主动分页获取更多评论）──
+        network_comments = await self._extract_comments_via_network(video_id, max_comments)
+        if network_comments:
+            logger.info("API直接调用: 提取了 %d 条评论", len(network_comments))
+            if self.checkpoint:
+                self.checkpoint.mark_scraped("comments", ck_key, {"comments": network_comments})
+            return network_comments[:max_comments]
+
+        # ── 策略2: JS 全局状态提取（fallback）──
+        js_comments = await self._extract_comments_from_js()
+        if js_comments:
+            logger.info("从 JS 全局状态提取了 %d 条评论", len(js_comments))
+            if self.checkpoint:
+                self.checkpoint.mark_scraped("comments", ck_key, {"comments": js_comments})
+            return js_comments[:max_comments]
+
+        # ── 策略3: DOM 提取（最后 fallback，非 CDP 模式）──
+        logger.info("API 和 JS 均未获取到评论，尝试 DOM 提取...")
+        comments = await self._extract_comments_from_dom(video_id, max_comments)
+
+        if self.checkpoint:
+            self.checkpoint.mark_scraped("comments", ck_key, {"comments": comments})
+
+        logger.info("视频 %s: DOM 提取了 %d 条评论", video_id, len(comments))
+        return comments[:max_comments]
+
+    async def _extract_comments_from_dom(self, video_id: str, max_comments: int = 200) -> list[dict]:
+        """DOM 提取评论（传统方式，非 CDP 模式 fallback）"""
+        # 等待评论加载
+        comment_loaded = False
+        for wait_sel in [
+            '[data-e2e="comment-item"]',
+            '[class*="DivCommentItem"]',
+            '[class*="CommentItem"]',
+            'div[class*="comment"]',
+        ]:
+            try:
+                await self._page.wait_for_selector(wait_sel, timeout=8000)
+                count = await self._page.locator(wait_sel).count()
+                if count > 0:
+                    logger.info("评论已加载: %s (找到 %d 个元素)", wait_sel, count)
+                    comment_loaded = True
+                    break
+            except Exception:
+                continue
+
+        if not comment_loaded:
+            try:
+                await self._page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
 
         comments = []
         scroll_count = 0
-        max_scrolls = (max_comments // 10) + 10
+        max_scrolls = (max_comments // 8) + 15
         seen_texts = set()
+
+        COMMENT_ITEM_SEL = (
+            'div[data-e2e="comment-item"], '
+            'div[class*="CommentItem"], div[class*="DivCommentItem"], '
+            'div[class*="comment-item"], div[class*="comment-container"], '
+            'div[class*="CommentList"] > div, '
+            'div[class*="comment-list"] > div'
+        )
+        COMMENT_TEXT_SEL = (
+            '[data-e2e="comment-text"], '
+            'p[class*="comment"], span[class*="text"], '
+            '[class*="CommentText"], [class*="comment-content"], '
+            'span[class*="ContentText"]'
+        )
+        COMMENT_USER_SEL = (
+            '[data-e2e="comment-username"], '
+            'a[class*="username"], span[class*="user"], '
+            '[class*="CommentUserName"], [class*="author"], '
+            'a[class*="UserName"]'
+        )
+        COMMENT_LIKES_SEL = (
+            '[data-e2e="comment-like-count"], '
+            'span[class*="like"], [class*="CommentLike"], '
+            'span[class*="LikeCount"]'
+        )
+        COMMENT_TIME_SEL = (
+            'span[class*="time"], span[class*="date"], '
+            '[class*="CommentTime"], time'
+        )
 
         while len(comments) < max_comments and scroll_count < max_scrolls:
             try:
-                comment_els = self._page.locator('[data-e2e="comment-item"], [class*="CommentItem"], [class*="DivCommentItem"]')
+                comment_els = self._page.locator(COMMENT_ITEM_SEL)
                 count = await comment_els.count()
 
                 for i in range(count):
@@ -1181,34 +1761,69 @@ class TikTokScraper:
                         break
                     try:
                         el = comment_els.nth(i)
-                        text_el = el.locator('[data-e2e="comment-text"], p[class*="comment"], span[class*="text"]')
-                        user_el = el.locator('[data-e2e="comment-username"], a[class*="username"], span[class*="user"]')
-                        likes_el = el.locator('[data-e2e="comment-like-count"], span[class*="like"]')
 
-                        text = (await text_el.first.inner_text()).strip() if await text_el.count() > 0 else ""
+                        text_el = el.locator(COMMENT_TEXT_SEL)
+                        text = ""
+                        if await text_el.count() > 0:
+                            text = (await text_el.first.inner_text()).strip()
+
+                        if not text:
+                            text = (await el.inner_text()).strip()
+                            if "\n" in text:
+                                lines = text.split("\n")
+                                text = "\n".join(lines[1:3]) if len(lines) > 1 else text
+
                         if not text or text in seen_texts:
                             continue
 
                         seen_texts.add(text)
-                        comment = {
+
+                        user_el = el.locator(COMMENT_USER_SEL)
+                        comment_user = ""
+                        if await user_el.count() > 0:
+                            comment_user = (await user_el.first.inner_text()).strip()
+
+                        likes_el = el.locator(COMMENT_LIKES_SEL)
+                        likes = 0
+                        if await likes_el.count() > 0:
+                            likes = _parse_count((await likes_el.first.inner_text()).strip())
+
+                        time_el = el.locator(COMMENT_TIME_SEL)
+                        comment_time = ""
+                        if await time_el.count() > 0:
+                            comment_time = (await time_el.first.inner_text()).strip()
+
+                        comments.append({
                             "video_id": video_id,
                             "text": text,
-                            "username": (await user_el.first.inner_text()).strip() if await user_el.count() > 0 else "",
-                            "likes": _parse_count(await likes_el.first.inner_text()) if await likes_el.count() > 0 else 0,
-                        }
-                        comments.append(comment)
+                            "username": comment_user,
+                            "likes": likes,
+                            "time": comment_time,
+                        })
                     except Exception:
                         continue
 
             except Exception as e:
-                logger.error("提取评论失败: %s", e)
+                logger.error("DOM 提取评论失败: %s", e)
 
             if len(comments) >= max_comments:
                 break
 
             await self._page.evaluate("""
-                const commentsSection = document.querySelector('[class*="comment"]') || window;
-                commentsSection.scrollBy?.(0, 600) || window.scrollBy(0, 600);
+                (() => {
+                    const container = document.querySelector(
+                        '[class*="CommentListContainer"], ' +
+                        '[class*="comment-list-container"], ' +
+                        '[class*="DivCommentListContainer"], ' +
+                        'div[class*="DivCommentList"], ' +
+                        '[class*="comment"]'
+                    );
+                    if (container && container.scrollHeight > container.clientHeight) {
+                        container.scrollBy(0, 800);
+                    } else {
+                        window.scrollBy(0, 800);
+                    }
+                })();
             """)
             await self._sleep_with_jitter()
             scroll_count += 1
@@ -1220,11 +1835,76 @@ class TikTokScraper:
                 if not await self._handle_rate_limit():
                     break
 
-        if self.checkpoint:
-            self.checkpoint.mark_scraped("comments", ck_key, {"comments": comments})
+        return comments
 
-        logger.info("视频 %s: 提取了 %d 条评论", video_id, len(comments))
-        return comments[:max_comments]
+    async def _extract_comments_from_js(self) -> list[dict]:
+        """P0修复: 从 TikTok JS 全局状态提取评论（绕过DOM等待问题）"""
+        try:
+            result = await self._page.evaluate("""
+                (() => {
+                    // 方法1: __UNIVERSAL_DATA_FOR_REHYDRATION__ (新版TikTok)
+                    const udr = window.__UNIVERSAL_DATA_FOR_REHYDRATION__;
+                    if (udr) {
+                        const data = udr.__DEFAULT_SCOPE__ || udr;
+                        // 遍历查找评论数据
+                        function findComments(obj, depth) {
+                            if (!obj || typeof obj !== 'object' || depth > 8) return null;
+                            if (Array.isArray(obj) && obj.length > 0 && obj[0] && obj[0].text) {
+                                return obj;
+                            }
+                            for (const key of Object.keys(obj)) {
+                                if (key.includes('comment') || key === 'list' || key === 'items') {
+                                    const found = findComments(obj[key], depth + 1);
+                                    if (found) return found;
+                                }
+                            }
+                            return null;
+                        }
+                        const comments = findComments(data, 0);
+                        if (comments && comments.length > 0) {
+                            return comments.slice(0, 500).map(c => ({
+                                text: c.text || c.content || '',
+                                username: c.uniqueId || c.user?.uniqueId || c.author?.uniqueId || '',
+                                likes: c.likes || c.likeCount || c.diggCount || 0,
+                                time: c.createTime ? new Date(c.createTime * 1000).toISOString() : '',
+                                reply_count: c.replyCount || c.replyTotal || c.subCommentCount || 0
+                            }));
+                        }
+                    }
+
+                    // 方法2: SIGI_STATE (旧版TikTok)
+                    const sigi = window.SIGI_STATE;
+                    if (sigi) {
+                        const data = typeof sigi === 'string' ? JSON.parse(sigi) : sigi;
+                        // ItemModule 可能包含评论
+                        const items = data?.ItemModule || {};
+                        for (const vid of Object.keys(items)) {
+                            const item = items[vid];
+                            if (item?.commentList && Array.isArray(item.commentList)) {
+                                return item.commentList.slice(0, 500).map(c => ({
+                                    text: c.text || c.content || '',
+                                    username: c.uniqueId || c.user?.uniqueId || '',
+                                    likes: c.likes || c.likeCount || c.diggCount || 0,
+                                    time: c.createTime ? new Date(c.createTime * 1000).toISOString() : '',
+                                    reply_count: c.replyCount || c.subCommentCount || 0
+                                }));
+                            }
+                        }
+                    }
+
+                    return null;
+                })();
+            """)
+
+            if result and isinstance(result, list) and len(result) > 0:
+                # 补充 video_id
+                for c in result:
+                    c["video_id"] = c.get("video_id", "")  # JS提取的可能没有
+                return result
+        except Exception as e:
+            logger.debug("JS 评论提取失败: %s", e)
+
+        return []
 
     # ───────────────────── 完整工作流 ─────────────────────
 
@@ -1236,6 +1916,7 @@ class TikTokScraper:
         videos_per_account: int = 30,
         comments_per_video: int = 200,
         comments_video_count: int = 3,
+        enrich_top: int = 0,
     ) -> dict:
         """执行完整分析流程"""
         all_accounts = []
@@ -1293,14 +1974,34 @@ class TikTokScraper:
 
             await self._emit_progress(f"提取视频 ({i+1}/{len(all_accounts)}): @{username}")
 
-            videos = await self.extract_videos(username, videos_per_account)
+            videos = await self.extract_videos(username, videos_per_account, enrich_top=enrich_top)
             for v in videos:
                 v["account_username"] = username
             all_videos.extend(videos)
 
             # 对前 N 条热门视频提取评论
             top_videos = sorted(videos, key=lambda x: x.get("digg_count", 0), reverse=True)[:comments_video_count]
+
+            # ── 前置过滤层: 跳过低质量视频，减少无效 API 调用 ──
+            qualified = []
+            skipped = 0
             for v in top_videos:
+                digg = v.get("digg_count", 0) or 0
+                cc = v.get("comment_count", 0) or 0
+                if digg < 10:
+                    logger.debug("前置过滤: %s 点赞=%s < 10, 跳过评论抓取", v.get("id"), digg)
+                    skipped += 1
+                elif cc == 0:
+                    logger.debug("前置过滤: %s 评论=0, 跳过评论抓取", v.get("id"))
+                    skipped += 1
+                else:
+                    qualified.append(v)
+            if skipped:
+                logger.info("前置过滤: @%s 跳过 %d/%d 条低质量视频 (点赞<10 或 评论=0)",
+                            username, skipped, len(top_videos))
+            # ── 过滤结束 ──
+
+            for v in qualified:
                 vid = v.get("id", "")
                 if not vid:
                     continue

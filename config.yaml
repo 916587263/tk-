@@ -1,0 +1,116 @@
+# ============================================================
+# TikTok 竞争对手分析系统 - 配置文件
+# 所有过滤、评分、意图检测参数均可在此调整
+# 修改后下次启动分析自动生效，无需重启 Web 服务
+# ============================================================
+
+# ── P0: 账号过滤 ──
+account_filter:
+  enabled: false                 # 默认关闭，避免误杀有用账号
+  min_followers: 0               # 最低粉丝数（0=不过滤）
+  max_followers: 0               # 最高粉丝数
+  min_likes: 0                   # 最低点赞总数
+  max_likes: 0                   # 最高点赞总数
+  min_videos: 0                  # 最低视频数
+  max_videos: 0                  # 最高视频数
+  min_engagement_rate: 0.0       # 最低互动率 (likes/followers)，如 0.01=1%
+  require_verified: false        # 只要认证号
+  require_bio: false             # 必须有简介
+  require_avatar: false          # 必须有头像
+  require_contact: false         # 简介必须有联系方式(邮箱/WhatsApp/网址)
+  region_whitelist: []           # 只保留这些地区，如 ["US", "GB"]
+  region_blacklist: []           # 排除这些地区
+  language_whitelist: []         # 只保留这些语言，如 ["en", "zh"]
+  bio_keywords: []               # 简介必须包含任一
+  bio_keywords_all: []           # 简介必须包含全部
+  bio_blacklist: []              # 简介含这些词则排除
+  nickname_blacklist: []         # 昵称含这些词则排除
+  username_blacklist: []         # 用户名含这些词则排除
+
+# ── P1: 账号评分 ──
+account_scorer:
+  enabled: true
+  weight_followers: 0.30         # 粉丝数权重
+  weight_engagement: 0.25        # 互动率权重 (likes/followers)
+  weight_verified: 0.10          # 认证加分
+  weight_bio_quality: 0.10       # 简介完整度
+  weight_video_count: 0.10       # 视频产量
+  weight_consistency: 0.10       # 内容一致性
+  weight_region_match: 0.05      # 地区匹配
+  follower_benchmark: 10000      # B2B账号基准（10K粉丝已是不错的工厂号）
+  like_benchmark: 100000         # B2B点赞基准
+  video_benchmark: 200           # B2B视频数基准
+  verified_bonus: 15.0
+  region_match_bonus: 10.0
+  target_regions: []             # 目标市场，如 ["US"]
+
+# ── P2: 视频深度抓取 ──
+video_scraping:
+  enrich_top: 20                 # 对点赞 Top N 条视频进入详情页补充精确互动数据（0=跳过）
+
+# ── P3: 视频过滤 ──
+video_filter:
+  enabled: false                 # 默认关闭
+  min_plays: 0
+  min_digg: 0
+  min_comments: 0
+  min_shares: 0
+  min_engagement_rate: 0.0
+  require_description: false
+  require_tags: false
+  min_description_length: 0
+  min_tags: 0
+  desc_blacklist: []
+  tag_whitelist: []
+  min_duration: 0
+  max_duration: 0
+
+# ── P3: 视频评分 ──
+video_scorer:
+  enabled: true
+  weight_plays: 0.20             # 播放量
+  weight_engagement: 0.30        # 总互动率
+  weight_digg: 0.20              # 点赞
+  weight_comment_rate: 0.15      # 评论率（话题性）
+  weight_share_rate: 0.10        # 分享率（传播力）
+  weight_quality: 0.05           # 内容质量
+  play_benchmark: 100000
+  digg_benchmark: 10000
+  has_tags_bonus: 5.0
+  has_description_bonus: 5.0
+  min_description_length: 20
+  optimal_duration_range: [15, 60]
+
+# ── 爆款视频发现 ──
+viral_detector:
+  enabled: true
+  viral_score_threshold: 60.0       # VideoScorer 评分 >= 此值视为爆款候选
+  viral_virality_threshold: 3.0     # 病毒系数 >= 此值
+  viral_engagement_threshold: 0.05  # 互动率 >= 5%
+  min_plays_for_viral: 10000        # 最低播放量（过滤小样本噪声）
+  global_top_n: 10                  # 全局爆款 Top N
+  per_account_top_n: 5              # 每账号互动率 Top N
+  tag_frequency_top_n: 20           # 高频标签取前 N
+  engagement_benchmark_percentiles: [25, 50, 75]  # 互动率分位数
+
+# ── P5: 商业意图检测 ──
+intent_detector:
+  enabled: true
+  min_confidence: 0.3
+  max_intents_per_comment: 3
+  enabled_categories:            # 启用的意图类别
+    - purchase_intent
+    - product_inquiry
+    - price_sensitivity
+    - comparison
+    - pain_point
+    - recommendation_request
+  custom_keywords: {}            # 用户自定义关键词，如 {"purchase_intent": ["我要这个", "给我链接"]}
+
+# ── P6: AI 分析增强 ──
+ai_analysis:
+  use_scored_data: true          # 是否将评分数据传入 AI 分析
+  use_intent_data: true          # 是否将意图识别结果传入 AI 分析
+  max_accounts_in_prompt: 20     # 传入 AI 的最大账号数
+  max_videos_in_prompt: 30       # 传入 AI 的最大视频数
+  max_comments_in_prompt: 200    # 传入 AI 的最大评论数

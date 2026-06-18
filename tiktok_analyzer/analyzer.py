@@ -52,6 +52,59 @@ ANALYSIS_PROMPT = """你是一位专业的 TikTok 市场分析专家。请分析
 }}
 """
 
+# P6: 增强版 Prompt — 包含系统评分和意图识别结果
+ANALYSIS_PROMPT_ENHANCED = """你是一位专业的 TikTok 市场分析专家。请分析以下 TikTok 竞争对手数据（已附系统自动评分和商业意图识别结果）。
+
+## 🏆 账号排行（按综合评分降序，前{max_accounts}名）
+{accounts_scored}
+
+## 🔥 视频排行（按综合评分降序，前{max_videos}条）
+{videos_scored}
+
+## 💬 精选评论
+{comments}
+
+## 🧠 商业意图自动识别结果
+{intent_summary}
+
+## 📊 数据统计
+- 总账号: {total_accounts}, 总视频: {total_videos}, 总评论: {total_comments}
+- 评分等级分布（账号）: {account_tiers}
+- 评分等级分布（视频）: {video_tiers}
+
+请从以下六个维度进行分析，输出 JSON：
+
+1. **business_needs**（商业需求）：目标受众在寻找什么产品或服务？他们的消费动机是什么？
+2. **purchase_needs**（采购需求）：从评论和视频内容中，能看出哪些具体的购买意向？
+3. **pain_points**（用户痛点）：用户遇到了哪些问题、抱怨、不满？
+4. **market_gaps**（市场空白）：未被充分满足的需求、缺少的产品类型、内容空白
+5. **competitor_insights**（竞品洞察）：头部竞争对手的策略、差异化优势、可模仿的成功模式
+6. **actionable_strategy**（可执行策略）：基于以上分析的具体行动建议（内容策略+产品策略+定价策略）
+
+每个发现请包含：
+- finding: 发现
+- evidence: 引用证据（可以引用系统的评分和意图识别数据）
+- priority: 优先级 1-10
+- confidence: 置信度 0.0-1.0
+- suggestion: 可操作建议
+
+输出格式：
+{{
+  "analysis": {{
+    "business_needs": [
+      {{"finding": "...", "evidence": "...", "priority": 8, "confidence": 0.9, "suggestion": "..."}}
+    ],
+    "purchase_needs": [...],
+    "pain_points": [...],
+    "market_gaps": [...],
+    "competitor_insights": [...],
+    "actionable_strategy": [...]
+  }},
+  "summary": "一句话总结核心发现",
+  "market_opportunity_score": 85
+}}
+"""
+
 
 class TikTokAnalyzer:
     """使用 OpenAI API 分析 TikTok 数据"""
@@ -131,6 +184,132 @@ class TikTokAnalyzer:
                 "purchase_needs": [],
                 "pain_points": [],
                 "summary": f"分析出错: {e}"
+            }
+
+    async def analyze_enhanced(self, scraped_data: dict, intent_data: dict = None,
+                                config: dict = None) -> dict:
+        """P6: 增强版分析 — 使用系统评分和意图识别数据，产出6维度商业分析"""
+        logger.info("开始增强版 OpenAI 分析...")
+
+        cfg = config or {}
+        max_accounts = cfg.get("max_accounts_in_prompt", 20)
+        max_videos = cfg.get("max_videos_in_prompt", 30)
+        max_comments = cfg.get("max_comments_in_prompt", 200)
+
+        accounts = scraped_data.get("accounts", [])
+        videos = scraped_data.get("videos", [])
+        comments = scraped_data.get("comments", [])
+
+        # 构建评分账号摘要（包含 score/tier）
+        def _fmt_account(a: dict, i: int) -> str:
+            score = a.get("score", "-")
+            tier = a.get("tier", "?")
+            return (
+                f"  #{i+1} @{a.get('username','?')} | 粉丝:{a.get('follower_count',0):,} | "
+                f"点赞:{a.get('like_count',0):,} | 评分:{score}({tier}级) | "
+                f"简介:{ (a.get('bio','') or '')[:60] }"
+            )
+        accounts_scored = "\n".join([
+            _fmt_account(a, i) for i, a in enumerate(accounts[:max_accounts])
+        ])
+
+        # 构建评分视频摘要
+        def _fmt_video(v: dict, i: int) -> str:
+            score = v.get("score", "-")
+            tier = v.get("tier", "?")
+            virality = v.get("virality", "-")
+            return (
+                f"  #{i+1} @{v.get('account_username','?')} | 播放:{v.get('play_count',0):,} | "
+                f"点赞:{v.get('digg_count',0):,} | 评论:{v.get('comment_count',0):,} | "
+                f"评分:{score}({tier}级) | 病毒系数:{virality} | "
+                f"{ (v.get('desc','') or '')[:80] }"
+            )
+        videos_scored = "\n".join([
+            _fmt_video(v, i) for i, v in enumerate(videos[:max_videos])
+        ])
+
+        # 精选评论（优先高意图评论）
+        intent_comments = []
+        other_comments = []
+        for c in comments:
+            if c.get("has_intent"):
+                intent_comments.append(c)
+            else:
+                other_comments.append(c)
+        selected_comments = intent_comments[:150] + other_comments[:50]
+        comments_str = "\n".join([
+            f"- [{c.get('username','')}] {c.get('text','')[:150]} "
+            f"(like:{c.get('likes',0)}, 意图:{c.get('top_intent','无')})"
+            for c in selected_comments[:max_comments]
+        ])
+
+        # 意图识别摘要
+        intent_summary = "未启用"
+        if intent_data:
+            s = intent_data.get("summary", {})
+            intent_summary = (
+                f"含商业意图的评论占比: {s.get('intent_rate',0):.1%}\n"
+                f"意图分布: {s.get('category_counts',{})}\n"
+                f"各类占比: {s.get('category_percentages',{})}"
+            )
+
+        # 等级分布
+        account_tiers = {}
+        for a in accounts:
+            t = a.get("tier", "?")
+            account_tiers[t] = account_tiers.get(t, 0) + 1
+        video_tiers = {}
+        for v in videos:
+            t = v.get("tier", "?")
+            video_tiers[t] = video_tiers.get(t, 0) + 1
+
+        prompt = ANALYSIS_PROMPT_ENHANCED.format(
+            accounts_scored=accounts_scored[:4000],
+            videos_scored=videos_scored[:4000],
+            comments=comments_str[:5000],
+            intent_summary=intent_summary[:1000],
+            total_accounts=scraped_data.get("total_accounts", 0),
+            total_videos=scraped_data.get("total_videos", 0),
+            total_comments=scraped_data.get("total_comments", 0),
+            account_tiers=str(account_tiers),
+            video_tiers=str(video_tiers),
+            max_accounts=max_accounts,
+            max_videos=max_videos,
+        )
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一位 TikTok 市场分析专家，擅长从数据中提取商业洞察。请始终以 JSON 格式输出。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=4000,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            result = json.loads(content)
+            logger.info("增强版 OpenAI 分析完成")
+
+            analysis = result.get("analysis", result)
+            analysis["summary"] = result.get("summary", "")
+            analysis["market_opportunity_score"] = result.get("market_opportunity_score", None)
+            return analysis
+
+        except Exception as e:
+            logger.error("增强版 OpenAI 分析失败: %s", e)
+            return {
+                "error": str(e),
+                "business_needs": [],
+                "purchase_needs": [],
+                "pain_points": [],
+                "market_gaps": [],
+                "competitor_insights": [],
+                "actionable_strategy": [],
+                "summary": f"分析出错: {e}",
+                "market_opportunity_score": None,
             }
 
     async def analyze_batch(self, scraped_data: dict, chunk_size: int = 50) -> dict:

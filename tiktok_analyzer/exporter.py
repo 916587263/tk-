@@ -28,9 +28,16 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
     acc_file = out_dir / "accounts.csv"
     with open(acc_file, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["用户名", "昵称", "粉丝数", "点赞数", "关注数", "视频数", "认证", "简介", "地区", "链接"])
+        has_scores = any(a.get("score") is not None for a in scraped_data.get("accounts", []))
+        header = ["用户名", "昵称", "粉丝数", "点赞数", "关注数", "视频数", "认证", "简介", "地区", "链接"]
+        has_viral = any(a.get("viral_profile") is not None for a in scraped_data.get("accounts", []))
+        if has_scores:
+            header.extend(["综合评分", "等级", "互动率"])
+        if has_viral:
+            header.extend(["平均点赞", "平均评论", "平均分享", "平均互动率", "爆款占比", "互动率基准"])
+        writer.writerow(header)
         for a in scraped_data.get("accounts", []):
-            writer.writerow([
+            row = [
                 a.get("username", ""),
                 a.get("nickname", ""),
                 a.get("follower_count", 0),
@@ -41,16 +48,41 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
                 a.get("bio", ""),
                 a.get("region", ""),
                 a.get("url", ""),
-            ])
+            ]
+            if has_scores:
+                bd = a.get("score_breakdown", {})
+                row.extend([
+                    a.get("score", ""),
+                    a.get("tier", ""),
+                    bd.get("engagement_rate", ""),
+                ])
+            if has_viral:
+                vp = a.get("viral_profile") or {}
+                row.extend([
+                    vp.get("avg_likes", ""),
+                    vp.get("avg_comments", ""),
+                    vp.get("avg_shares", ""),
+                    vp.get("avg_engagement_rate", ""),
+                    vp.get("viral_ratio", ""),
+                    (vp.get("vs_global_benchmark") or {}).get("engagement", ""),
+                ])
+            writer.writerow(row)
     files["accounts"] = str(acc_file)
 
     # 2. 视频 CSV
     vid_file = out_dir / "videos.csv"
     with open(vid_file, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["账号", "视频ID", "标题/文案", "标签", "播放量", "点赞数", "评论数", "分享数", "时长(秒)", "音乐", "链接"])
+        has_scores = any(v.get("score") is not None for v in scraped_data.get("videos", []))
+        header = ["账号", "视频ID", "标题/文案", "标签", "播放量", "点赞数", "评论数", "分享数", "时长(秒)", "音乐", "链接"]
+        has_viral = any(v.get("engagement_rank") is not None for v in scraped_data.get("videos", []))
+        if has_scores:
+            header.extend(["综合评分", "等级", "病毒系数"])
+        if has_viral:
+            header.extend(["账号内排名", "是否爆款", "互动率百分位"])
+        writer.writerow(header)
         for v in scraped_data.get("videos", []):
-            writer.writerow([
+            row = [
                 v.get("account_username", ""),
                 v.get("id", ""),
                 v.get("desc", ""),
@@ -62,22 +94,47 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
                 v.get("duration", 0),
                 v.get("music", ""),
                 v.get("url", ""),
-            ])
+            ]
+            if has_scores:
+                row.extend([
+                    v.get("score", ""),
+                    v.get("tier", ""),
+                    v.get("virality", ""),
+                ])
+            if has_viral:
+                row.extend([
+                    v.get("engagement_rank", ""),
+                    "是" if v.get("is_viral") else "否",
+                    v.get("engagement_percentile", ""),
+                ])
+            writer.writerow(row)
     files["videos"] = str(vid_file)
 
     # 3. 评论 CSV
     cmt_file = out_dir / "comments.csv"
     with open(cmt_file, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["账号", "视频ID", "用户名", "评论内容", "点赞数"])
+        has_intents = any(c.get("has_intent") is not None for c in scraped_data.get("comments", []))
+        header = ["账号", "视频ID", "用户名", "评论内容", "点赞数", "时间"]
+        if has_intents:
+            header.extend(["含商业意图", "意图类型", "意图置信度"])
+        writer.writerow(header)
         for c in scraped_data.get("comments", []):
-            writer.writerow([
+            row = [
                 c.get("account_username", ""),
                 c.get("video_id", ""),
                 c.get("username", ""),
                 c.get("text", ""),
                 c.get("likes", 0),
-            ])
+                c.get("time", ""),
+            ]
+            if has_intents:
+                row.extend([
+                    "是" if c.get("has_intent") else "否",
+                    c.get("top_intent", ""),
+                    c.get("top_intent_confidence", ""),
+                ])
+            writer.writerow(row)
     files["comments"] = str(cmt_file)
 
     # 4. 分析结果 CSV
@@ -85,18 +142,57 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
         ana_file = out_dir / "analysis.csv"
         with open(ana_file, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
-            writer.writerow(["维度", "发现", "证据", "优先级", "建议"])
-            for dim in ["business_needs", "purchase_needs", "pain_points"]:
-                dim_label = {"business_needs": "商业需求", "purchase_needs": "采购需求", "pain_points": "用户痛点"}.get(dim, dim)
+            dim_labels = {
+                "business_needs": "商业需求",
+                "purchase_needs": "采购需求",
+                "pain_points": "用户痛点",
+                "market_gaps": "市场空白",
+                "competitor_insights": "竞品洞察",
+                "actionable_strategy": "可执行策略",
+            }
+            header = ["维度", "发现", "证据", "优先级", "置信度", "建议"]
+            writer.writerow(header)
+            for dim in dim_labels:
                 for item in analysis_data.get(dim, []):
                     writer.writerow([
-                        dim_label,
+                        dim_labels.get(dim, dim),
                         item.get("finding", ""),
                         item.get("evidence", ""),
                         item.get("priority", 0),
+                        item.get("confidence", ""),
                         item.get("suggestion", ""),
                     ])
         files["analysis"] = str(ana_file)
+
+    # 5. 爆款视频 CSV（全局 Top N）
+    all_videos = scraped_data.get("videos", [])
+    viral_videos = [v for v in all_videos if v.get("is_global_top10")]
+    if viral_videos:
+        viral_file = out_dir / "viral_videos.csv"
+        with open(viral_file, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "排名", "账号", "视频ID", "描述", "播放量", "点赞数", "评论数",
+                "分享数", "互动率", "综合评分", "等级", "病毒系数", "标签", "链接"
+            ])
+            for v in viral_videos:
+                writer.writerow([
+                    v.get("global_rank", ""),
+                    v.get("account_username", ""),
+                    v.get("id", ""),
+                    (v.get("desc") or "")[:100],
+                    v.get("play_count", 0),
+                    v.get("digg_count", 0),
+                    v.get("comment_count", 0),
+                    v.get("share_count", 0),
+                    f"{v.get('_engagement_rate', 0):.2%}" if v.get("_engagement_rate") is not None else "",
+                    v.get("score", ""),
+                    v.get("tier", ""),
+                    v.get("virality", ""),
+                    ",".join(v.get("tags", [])),
+                    v.get("url", ""),
+                ])
+        files["viral_videos"] = str(viral_file)
 
     logger.info("CSV 文件已导出到: %s", out_dir)
     return files
@@ -136,19 +232,33 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
     # 账号排名
     lines.append(f"## 🏆 账号排行榜（按粉丝数）")
     lines.append(f"")
-    lines.append(f"| 排名 | 账号 | 昵称 | 粉丝 | 点赞 | 简介 |")
-    lines.append(f"|------|------|------|------|------|------|")
+    has_scores = any(a.get("score") is not None for a in scraped_data.get("accounts", []))
+    if has_scores:
+        lines.append(f"| 排名 | 账号 | 昵称 | 粉丝 | 点赞 | 评分 | 等级 | 简介 |")
+        lines.append(f"|------|------|------|------|------|------|------|------|")
+    else:
+        lines.append(f"| 排名 | 账号 | 昵称 | 粉丝 | 点赞 | 简介 |")
+        lines.append(f"|------|------|------|------|------|------|")
     accounts_sorted = sorted(
         scraped_data.get("accounts", []),
         key=lambda x: x.get("follower_count", 0) or 0,
         reverse=True
     )
     for i, a in enumerate(accounts_sorted[:20], 1):
-        lines.append(
-            f"| {i} | @{a.get('username', '')} | {a.get('nickname', '')} | "
-            f"{_fmt_count(a.get('follower_count', 0))} | {_fmt_count(a.get('like_count', 0))} | "
-            f"{a.get('bio', '')[:50]} |"
-        )
+        if has_scores:
+            lines.append(
+                f"| {i} | @{a.get('username', '')} | {a.get('nickname', '')} | "
+                f"{_fmt_count(a.get('follower_count', 0))} | {_fmt_count(a.get('like_count', 0))} | "
+                f"{a.get('score', '-')}{'⭐' if a.get('tier') in ('S','A') else ''} | "
+                f"{a.get('tier_label', a.get('tier', ''))} | "
+                f"{a.get('bio', '')[:50]} |"
+            )
+        else:
+            lines.append(
+                f"| {i} | @{a.get('username', '')} | {a.get('nickname', '')} | "
+                f"{_fmt_count(a.get('follower_count', 0))} | {_fmt_count(a.get('like_count', 0))} | "
+                f"{a.get('bio', '')[:50]} |"
+            )
     lines.append(f"")
 
     # 热门视频
@@ -169,6 +279,115 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
             f"{_fmt_count(v.get('share_count', 0))} |"
         )
     lines.append(f"")
+
+    # ── 爆款视频 TOP 10 ──
+    all_videos = scraped_data.get("videos", [])
+    viral_videos = [v for v in all_videos if v.get("is_global_top10")]
+    if viral_videos:
+        lines.append(f"## 🔥 爆款视频 TOP {len(viral_videos)}")
+        lines.append(f"")
+        lines.append(f"| 排名 | 账号 | 描述 | 播放 | 点赞 | 评论 | 分享 | 互动率 | 评分 | 等级 |")
+        lines.append(f"|------|------|------|------|------|------|------|--------|------|------|")
+        for v in viral_videos:
+            desc = (v.get("desc") or "")[:50].replace("|", "/")
+            er = v.get("_engagement_rate", 0)
+            lines.append(
+                f"| {v.get('global_rank', '')} | @{v.get('account_username', '')} | {desc} | "
+                f"{_fmt_count(v.get('play_count', 0))} | {_fmt_count(v.get('digg_count', 0))} | "
+                f"{_fmt_count(v.get('comment_count', 0))} | {_fmt_count(v.get('share_count', 0))} | "
+                f"{er:.1%} | {v.get('score', '')} | {v.get('tier', '')} |"
+            )
+        lines.append(f"")
+
+    # ── 账号爆款特征 ──
+    accounts_with_viral = [
+        a for a in scraped_data.get("accounts", [])
+        if a.get("viral_profile")
+    ]
+    if accounts_with_viral:
+        lines.append(f"## 📊 账号爆款特征")
+        lines.append(f"")
+        for a in accounts_with_viral[:10]:  # Top 10 账号
+            vp = a.get("viral_profile", {})
+            nickname = a.get("nickname", "") or vp.get("nickname", "")
+            lines.append(f"### @{a.get('username', '')} — {nickname}")
+            lines.append(f"")
+            lines.append(f"| 指标 | 数值 | vs 全局 |")
+            lines.append(f"|------|------|---------|")
+            vs = vp.get("vs_global_benchmark", {})
+            lines.append(f"| 平均点赞 | {_fmt_count(vp.get('avg_likes', 0))} | {vs.get('likes', 'N/A')} |")
+            lines.append(f"| 平均评论 | {_fmt_count(vp.get('avg_comments', 0))} | {vs.get('comments', 'N/A')} |")
+            lines.append(f"| 平均分享 | {_fmt_count(vp.get('avg_shares', 0))} | {vs.get('shares', 'N/A')} |")
+            lines.append(f"| 平均互动率 | {vp.get('avg_engagement_rate', 0):.1%} | {vs.get('engagement', 'N/A')} |")
+            lines.append(f"| 爆款占比 | {vp.get('viral_ratio', 0):.0%} ({vp.get('viral_count', 0)}/{vp.get('total_videos', 0)}) | - |")
+            lines.append(f"")
+
+            # 最高互动率视频
+            h = vp.get("highest_engagement_video", {})
+            if h:
+                lines.append(f"**🔥 最高互动率视频**: [{h.get('desc', '')[:60]}]({h.get('url', '')}) "
+                           f"({h.get('engagement_rate', 0):.1%}, 播放{_fmt_count(h.get('play_count', 0))})")
+                lines.append(f"")
+
+            # Top 5 视频列表
+            top5 = vp.get("top_videos", [])[:5]
+            if top5:
+                lines.append(f"**Top 5 互动率视频**:")
+                lines.append(f"")
+                for j, tv in enumerate(top5, 1):
+                    lines.append(f"{j}. [{tv.get('desc', '')[:60]}]({tv.get('url', '')}) — "
+                               f"互动率 {tv.get('engagement_rate', 0):.1%}, "
+                               f"👍{_fmt_count(tv.get('digg_count', 0))} "
+                               f"💬{_fmt_count(tv.get('comment_count', 0))} "
+                               f"🔄{_fmt_count(tv.get('share_count', 0))}")
+                lines.append(f"")
+
+    # ── 爆款共性特征 ──
+    viral_chars = scraped_data.get("viral_characteristics")
+    if not viral_chars:
+        # 尝试从 scraped_data 的扩展属性获取（由 app.py 注入）
+        pass
+    if viral_chars and viral_chars.get("common_tags"):
+        lines.append(f"## 🧬 爆款共性特征")
+        lines.append(f"")
+        lines.append(f"**分析样本**: {viral_chars.get('sample_size', 0)} 条爆款视频")
+        lines.append(f"")
+
+        # 高频标签
+        tags = viral_chars.get("common_tags", [])
+        if tags:
+            lines.append(f"### 🏷️ 爆款高频标签")
+            lines.append(f"")
+            tag_items = [f"`#{t['tag']}`({t['count']})" for t in tags[:15]]
+            lines.append(" · ".join(tag_items))
+            lines.append(f"")
+
+        # 最优时长
+        dr = viral_chars.get("optimal_duration_range", [])
+        avg_dur = viral_chars.get("avg_duration", 0)
+        if dr:
+            lines.append(f"### ⏱ 最优时长")
+            lines.append(f"")
+            lines.append(f"- 爆款视频平均时长: **{avg_dur}s**")
+            lines.append(f"- 最优时长区间: **{dr[0]}s - {dr[1]}s**")
+            vs_dur = viral_chars.get("vs_global_avg_duration", 0)
+            if vs_dur:
+                direction = "长于" if vs_dur > 0 else "短于"
+                lines.append(f"- vs 全局平均: {direction} {abs(vs_dur)}s")
+            lines.append(f"")
+
+        # 描述特征
+        dp = viral_chars.get("description_patterns", {})
+        if dp:
+            lines.append(f"### 📝 描述特征")
+            lines.append(f"")
+            lines.append(f"| 特征 | 数值 |")
+            lines.append(f"|------|------|")
+            lines.append(f"| 平均描述长度 | {dp.get('avg_length', 0)} 字符 |")
+            lines.append(f"| Emoji 使用率 | {dp.get('emoji_usage_rate', 0):.0%} |")
+            lines.append(f"| CTA 使用率 | {dp.get('cta_usage_rate', 0):.0%} |")
+            lines.append(f"| 问句使用率 | {dp.get('question_usage_rate', 0):.0%} |")
+            lines.append(f"")
 
     # 高频标签
     lines.append(f"## 🏷️ 高频标签")
@@ -213,9 +432,19 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
         lines.append(f"## 🤖 AI 分析")
         lines.append(f"")
         lines.append(f"**总结**: {analysis_data.get('summary', 'N/A')}")
+        mos = analysis_data.get('market_opportunity_score')
+        if mos is not None:
+            lines.append(f"**市场机会评分**: {mos}/100")
         lines.append(f"")
 
-        for dim, label in [("business_needs", "💼 商业需求"), ("purchase_needs", "🛒 采购需求"), ("pain_points", "😤 用户痛点")]:
+        for dim, label in [
+            ("business_needs", "💼 商业需求"),
+            ("purchase_needs", "🛒 采购需求"),
+            ("pain_points", "😤 用户痛点"),
+            ("market_gaps", "🎯 市场空白"),
+            ("competitor_insights", "🔍 竞品洞察"),
+            ("actionable_strategy", "🚀 可执行策略"),
+        ]:
             items = analysis_data.get(dim, [])
             if items:
                 lines.append(f"### {label}")
@@ -224,6 +453,8 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
                     lines.append(f"#### {item.get('finding', '')}")
                     lines.append(f"")
                     lines.append(f"- **优先级**: {'⭐' * item.get('priority', 1)} ({item.get('priority', 0)}/10)")
+                    if item.get('confidence') is not None:
+                        lines.append(f"- **置信度**: {item.get('confidence', 0):.0%}")
                     lines.append(f"- **证据**: {item.get('evidence', '')}")
                     lines.append(f"- **建议**: {item.get('suggestion', '')}")
                     lines.append(f"")
