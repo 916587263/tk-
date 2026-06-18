@@ -346,6 +346,205 @@ td a:hover { text-decoration: underline; }
 }
 .priority-stars { color: var(--orange); }
 
+/* ═══════════ Stage Bar ═══════════ */
+.stage-bar {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 12px;
+    padding: 0 4px;
+}
+.stage-bar .stage {
+    flex: 1;
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    padding: 8px 0 4px;
+    position: relative;
+    transition: color var(--transition);
+}
+.stage-bar .stage::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    transition: background var(--transition);
+}
+.stage-bar .stage.done { color: var(--green); }
+.stage-bar .stage.done::before { background: var(--green); }
+.stage-bar .stage.active { color: var(--cyan); }
+.stage-bar .stage.active::before { background: var(--cyan); }
+.stage-dot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--border);
+    margin-right: 2px;
+    vertical-align: middle;
+    transition: background var(--transition);
+}
+.stage-bar .stage.done .stage-dot { background: var(--green); }
+.stage-bar .stage.active .stage-dot { background: var(--cyan); }
+
+/* ═══════════ Tier Badges ═══════════ */
+.tier-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-align: center;
+    min-width: 24px;
+}
+.tier-S { background: rgba(245,158,11,.2); color: #f59e0b; }
+.tier-A { background: rgba(34,197,94,.15); color: #22c55e; }
+.tier-B { background: rgba(74,108,247,.15); color: #4a6cf7; }
+.tier-C { background: rgba(124,128,153,.15); color: #7c8099; }
+.tier-D { background: rgba(86,90,112,.1); color: #565a70; }
+
+/* ═══════════ Intent Bars ═══════════ */
+.intent-summary {
+    background: var(--bg-input);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    margin-bottom: 16px;
+    border: 1px solid var(--border);
+}
+.intent-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+    font-size: 0.82rem;
+}
+.intent-bar-label {
+    width: 70px;
+    text-align: right;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+.intent-bar-track {
+    flex: 1;
+    height: 14px;
+    background: var(--bg-card);
+    border-radius: 7px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+.intent-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--blue), var(--cyan));
+    border-radius: 7px;
+    transition: width 0.5s ease;
+    min-width: 2px;
+}
+.intent-bar-count {
+    width: 70px;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    flex-shrink: 0;
+}
+
+/* ═══════════ Intent Mini Bar (table cells) ═══════════ */
+.intent-cell {
+    min-width: 140px;
+}
+.intent-mini-bar {
+    height: 6px;
+    background: var(--bg-card);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 3px;
+    border: 1px solid var(--border);
+}
+.intent-mini-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.5s ease;
+    min-width: 2px;
+}
+.intent-ratio-text {
+    font-size: 0.73rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+/* ═══════════ Reference Table ═══════════ */
+.ref-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+.ref-table thead th {
+    text-align: left;
+    padding: 10px 8px;
+    color: var(--text-dim);
+    font-weight: 500;
+    font-size: 0.76rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+.ref-table tbody td {
+    padding: 10px 8px;
+    border-bottom: 1px solid rgba(42,45,58,.4);
+    color: var(--text-muted);
+    vertical-align: middle;
+}
+.ref-table tbody tr:hover { background: rgba(255,255,255,.02); }
+.ref-table .score-cell {
+    font-weight: 700;
+    color: var(--cyan);
+    font-size: 0.95rem;
+}
+.ref-table .desc-cell {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ref-table .intent-types-cell {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    max-width: 100px;
+}
+.user-link {
+    color: var(--blue);
+    text-decoration: none;
+    font-weight: 500;
+}
+.user-link:hover { text-decoration: underline; color: var(--cyan); }
+
+/* ═══════════ Videos Table ═══════════ */
+.videos-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+.videos-table thead th {
+    text-align: left;
+    padding: 10px 8px;
+    color: var(--text-dim);
+    font-weight: 500;
+    font-size: 0.76rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+}
+.videos-table tbody td {
+    padding: 9px 8px;
+    border-bottom: 1px solid rgba(42,45,58,.4);
+    color: var(--text-muted);
+    vertical-align: middle;
+}
+.videos-table tbody tr:hover { background: rgba(255,255,255,.02); }
+.videos-table .desc-cell {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.videos-table .tags-cell {
+    max-width: 160px;
+    overflow: hidden;
+}
+
+.table-wrap { overflow-x: auto; }
+
 /* ═══════════ Scrollbar ═══════════ */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
@@ -357,5 +556,12 @@ td a:hover { text-decoration: underline; }
     .form-grid { grid-template-columns: 1fr; }
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
     .container { padding: 12px 10px 40px; }
-    .header h1 { font-size: 1.3rem; }
+    .header h1 { font-size: 1.2rem; }
+    .ref-table, .videos-table { font-size: 0.76rem; }
+    .ref-table .desc-cell, .videos-table .desc-cell { max-width: 100px; }
+    .intent-bar-label { width: 50px; font-size: 0.7rem; }
+    .intent-bar-count { width: 50px; font-size: 0.7rem; }
+    .stage-bar { gap: 2px; }
+    .stage-bar .stage { font-size: 0.68rem; padding: 6px 0 2px; }
+    .intent-cell { min-width: 100px; }
 }

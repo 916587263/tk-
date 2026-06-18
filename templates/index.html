@@ -3,106 +3,111 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TikTok 竞争对手分析系统</title>
+    <title>TikTok 外贸对标视频发现</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="container">
         <!-- Header -->
         <div class="header">
-            <h1>🎵 TikTok 竞争对手分析</h1>
-            <p>输入关键词 + 目标地区，自动抓取账号、视频、评论数据，AI 智能分析商业机会</p>
+            <h1>🔍 TikTok 外贸对标视频发现</h1>
+            <p>搜索行业关键词 → 抓取视频评论 → AI 识别采购意向 → 发现最值得参考的对标视频</p>
         </div>
 
         <!-- 配置表单 -->
         <div class="card" id="configPanel">
-            <div class="card-title"><span class="icon">⚙️</span> 分析配置</div>
-            <div class="form-grid">
-                <div class="form-group full">
-                    <label>🔑 搜索关键词</label>
-                    <textarea id="keywords" placeholder="每行或逗号分隔，例如：&#10;skincare, beauty tools, makeup tutorial&#10;护肤品, 美妆工具, 家居好物"></textarea>
-                    <div class="hint">支持中英文，多个关键词用逗号或换行分隔</div>
-                </div>
-                <div class="form-group">
-                    <label>🌍 目标客户地区</label>
-                    <input type="text" id="region" placeholder="例如：US, UK, 东南亚, 日本">
-                    <div class="hint">留空则不限制地区</div>
-                </div>
-                <div class="form-group">
-                    <label>🌐 浏览器选择</label>
-                    <select id="browser">
-                        <option value="msedge">Microsoft Edge</option>
-                        <option value="chrome">Google Chrome</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>🔗 CDP 连接模式（推荐）</label>
-                    <select id="cdpMode">
-                        <option value="0">普通模式（Playwright 启动）</option>
-                        <option value="9222">CDP 连接 (端口 9222)</option>
-                        <option value="9223">CDP 连接 (端口 9223)</option>
-                    </select>
-                    <div class="hint">
-                        <strong>推荐 CDP 模式</strong>：关闭浏览器后运行 <code>msedge --remote-debugging-port=9222</code>，
-                        在弹出的浏览器中登录 TikTok，然后选择 CDP 模式启动分析。可大幅减少反爬检测。
+            <div class="card-title" style="cursor:pointer" onclick="toggleConfig()">
+                <span class="icon">⚙️</span> 分析配置
+                <span style="margin-left:auto;font-size:0.8rem;color:var(--text-dim)" id="configToggle">收起 ▲</span>
+            </div>
+            <div id="configBody">
+                <div class="form-grid">
+                    <div class="form-group full">
+                        <label>🔑 搜索关键词</label>
+                        <textarea id="keywords" placeholder="每行或逗号分隔，例如：&#10;PP non woven bag, cotton tote bag manufacturer&#10;无纺布袋, 帆布袋工厂"></textarea>
+                        <div class="hint">输入行业/产品关键词，系统会搜索 TikTok 上相关视频并分析评论中的采购意向</div>
+                    </div>
+                    <div class="form-group">
+                        <label>🌍 目标地区</label>
+                        <input type="text" id="region" placeholder="留空不限，如：US, UK">
+                    </div>
+                    <div class="form-group">
+                        <label>🔗 连接模式</label>
+                        <select id="cdpMode">
+                            <option value="9222">CDP 连接 (端口 9222) — 推荐</option>
+                            <option value="0">普通模式 (Playwright 启动)</option>
+                            <option value="9223">CDP 连接 (端口 9223)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>📊 每关键词账号数</label>
+                        <input type="number" id="accountsPerKeyword" value="10" min="1" max="50">
+                    </div>
+                    <div class="form-group">
+                        <label>🎬 每账号视频数</label>
+                        <input type="number" id="videosPerAccount" value="30" min="1" max="100">
+                    </div>
+                    <div class="form-group">
+                        <label>💬 每视频评论数</label>
+                        <input type="number" id="commentsPerVideo" value="200" min="1" max="500">
                     </div>
                 </div>
-                <div class="form-group">
-                    <label>📊 每关键词抓取账号数</label>
-                    <input type="number" id="accountsPerKeyword" value="10" min="1" max="50">
-                </div>
-                <div class="form-group">
-                    <label>🎬 每账号抓取视频数</label>
-                    <input type="number" id="videosPerAccount" value="30" min="1" max="100">
-                </div>
-                <div class="form-group">
-                    <label>💬 热门视频评论数</label>
-                    <input type="number" id="commentsPerVideo" value="200" min="1" max="500">
-                </div>
-            </div>
 
-            <!-- AI 分析配置 -->
-            <div class="card-title" style="margin-top: 20px;"><span class="icon">🤖</span> AI 分析配置（可选）</div>
-            <div class="form-grid">
-                <div class="form-group full">
-                    <label>OpenAI API Key</label>
-                    <input type="password" id="openaiKey" placeholder="sk-...">
+                <!-- AI 配置（高级选项） -->
+                <div class="card-title" style="margin-top:16px;cursor:pointer" onclick="toggleAIConfig()">
+                    <span class="icon">🤖</span> AI 分析配置（可选）
+                    <span style="margin-left:auto;font-size:0.8rem;color:var(--text-dim)" id="aiToggle">展开 ▼</span>
                 </div>
-                <div class="form-group">
-                    <label>API Base URL（可选）</label>
-                    <input type="text" id="openaiBaseUrl" placeholder="https://api.openai.com/v1">
-                    <div class="hint">使用代理或第三方 API 时填写</div>
+                <div class="form-grid" id="aiConfigBody" style="display:none">
+                    <div class="form-group full">
+                        <label>OpenAI API Key</label>
+                        <input type="password" id="openaiKey" placeholder="sk-...">
+                    </div>
+                    <div class="form-group">
+                        <label>API Base URL（可选）</label>
+                        <input type="text" id="openaiBaseUrl" placeholder="https://api.openai.com/v1">
+                    </div>
+                    <div class="form-group">
+                        <label>模型</label>
+                        <select id="openaiModel">
+                            <option value="gpt-4o">GPT-4o</option>
+                            <option value="gpt-4o-mini">GPT-4o Mini</option>
+                            <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                        </select>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label>模型</label>
-                    <select id="openaiModel">
-                        <option value="gpt-4o">GPT-4o</option>
-                        <option value="gpt-4o-mini">GPT-4o Mini</option>
-                        <option value="gpt-4-turbo">GPT-4 Turbo</option>
-                    </select>
-                </div>
-            </div>
 
-            <button class="btn btn-primary" id="startBtn" onclick="startAnalysis()">
-                🚀 开始分析
-            </button>
+                <button class="btn btn-primary" id="startBtn" onclick="startAnalysis()">
+                    🚀 开始分析
+                </button>
+            </div>
         </div>
 
         <!-- 进度面板 -->
         <div class="card progress-panel" id="progressPanel">
-            <div class="card-title"><span class="icon">📡</span> 实时进度 <span class="progress-spinner" id="spinner"></span></div>
+            <div class="card-title">
+                <span class="icon">📡</span> 实时进度
+                <span class="progress-spinner" id="spinner"></span>
+                <span style="margin-left:auto;font-size:0.8rem;color:var(--text-dim)" id="elapsedTime"></span>
+            </div>
+            <div class="stage-bar" id="stageBar">
+                <div class="stage" data-stage="search"><span class="stage-dot"></span>搜索</div>
+                <div class="stage" data-stage="scrape"><span class="stage-dot"></span>抓取</div>
+                <div class="stage" data-stage="analyze"><span class="stage-dot"></span>分析</div>
+                <div class="stage" data-stage="export"><span class="stage-dot"></span>导出</div>
+            </div>
             <div class="progress-log" id="progressLog"></div>
         </div>
 
         <!-- 结果面板 -->
         <div class="results-panel" id="resultsPanel">
+            <!-- 统计卡片 -->
             <div class="card">
-                <div class="card-title"><span class="icon">📈</span> 数据概览</div>
-                <div class="stats-grid">
-                    <div class="stat-card"><div class="value" id="statAccounts">-</div><div class="label">分析账号</div></div>
-                    <div class="stat-card"><div class="value" id="statVideos">-</div><div class="label">抓取视频</div></div>
-                    <div class="stat-card"><div class="value" id="statComments">-</div><div class="label">抓取评论</div></div>
-                    <div class="stat-card"><div class="value" id="statKeywords">-</div><div class="label">关键词数</div></div>
+                <div class="stats-grid" id="statsGrid">
+                    <div class="stat-card"><div class="value" id="statReference">-</div><div class="label">🎯 对标参考视频</div></div>
+                    <div class="stat-card"><div class="value" id="statHighGrade">-</div><div class="label">⭐ S/A 级参考</div></div>
+                    <div class="stat-card"><div class="value" id="statIntentComments">-</div><div class="label">💬 含采购意向评论</div></div>
+                    <div class="stat-card"><div class="value" id="statIntentTypes">-</div><div class="label">🏷 涉及意图类别</div></div>
                 </div>
             </div>
 
@@ -115,16 +120,30 @@
             <!-- 详情标签 -->
             <div class="card">
                 <div class="tabs">
-                    <button class="tab-btn active" onclick="switchTab('accounts')">👥 账号排行</button>
-                    <button class="tab-btn" onclick="switchTab('videos')">🔥 热门视频</button>
+                    <button class="tab-btn active" onclick="switchTab('reference')">🎯 对标参考</button>
+                    <button class="tab-btn" onclick="switchTab('videos')">🔥 视频排行</button>
                     <button class="tab-btn" onclick="switchTab('analysis')">🤖 AI 分析</button>
                 </div>
-                <div class="tab-content active" id="tab-accounts">
-                    <table class="accounts-table" id="accountsTable"></table>
+
+                <!-- 对标参考标签 -->
+                <div class="tab-content active" id="tab-reference">
+                    <!-- 意图摘要卡 -->
+                    <div class="intent-summary" id="intentSummary"></div>
+                    <!-- 对标参考视频表 -->
+                    <div class="table-wrap">
+                        <table class="ref-table" id="refTable"></table>
+                    </div>
+                    <div class="hint" style="margin-top:8px" id="refEmpty"></div>
                 </div>
+
+                <!-- 视频排行标签 -->
                 <div class="tab-content" id="tab-videos">
-                    <table class="videos-table" id="videosTable"></table>
+                    <div class="table-wrap">
+                        <table class="videos-table" id="videosTable"></table>
+                    </div>
                 </div>
+
+                <!-- AI 分析标签 -->
                 <div class="tab-content" id="tab-analysis">
                     <div id="analysisContent"></div>
                 </div>
@@ -135,7 +154,35 @@
     <script>
         let currentTaskId = null;
         let eventSource = null;
+        let startTime = null;
+        let elapsedTimer = null;
 
+        // ═══════════════ 配置面板折叠 ═══════════════
+        function toggleConfig() {
+            const body = document.getElementById('configBody');
+            const toggle = document.getElementById('configToggle');
+            if (body.style.display === 'none') {
+                body.style.display = 'block';
+                toggle.textContent = '收起 ▲';
+            } else {
+                body.style.display = 'none';
+                toggle.textContent = '展开 ▼';
+            }
+        }
+
+        function toggleAIConfig() {
+            const body = document.getElementById('aiConfigBody');
+            const toggle = document.getElementById('aiToggle');
+            if (body.style.display === 'none') {
+                body.style.display = 'grid';
+                toggle.textContent = '收起 ▲';
+            } else {
+                body.style.display = 'none';
+                toggle.textContent = '展开 ▼';
+            }
+        }
+
+        // ═══════════════ 开始分析 ═══════════════
         function startAnalysis() {
             const keywords = document.getElementById('keywords').value.trim();
             if (!keywords) { alert('请输入至少一个关键词'); return; }
@@ -147,6 +194,15 @@
             document.getElementById('progressPanel').classList.add('active');
             document.getElementById('progressLog').innerHTML = '';
             document.getElementById('resultsPanel').classList.remove('active');
+            document.getElementById('elapsedTime').textContent = '';
+            resetStageBar();
+
+            // 自动折叠配置面板
+            document.getElementById('configBody').style.display = 'none';
+            document.getElementById('configToggle').textContent = '展开 ▼';
+
+            startTime = Date.now();
+            elapsedTimer = setInterval(updateElapsed, 1000);
 
             const data = {
                 keywords: keywords,
@@ -154,7 +210,7 @@
                 accounts_per_keyword: parseInt(document.getElementById('accountsPerKeyword').value) || 10,
                 videos_per_account: parseInt(document.getElementById('videosPerAccount').value) || 30,
                 comments_per_video: parseInt(document.getElementById('commentsPerVideo').value) || 200,
-                browser: document.getElementById('browser').value,
+                browser: 'msedge',
                 headless: false,
                 cdp_port: parseInt(document.getElementById('cdpMode').value) || 0,
                 openai_key: document.getElementById('openaiKey').value.trim(),
@@ -170,17 +226,44 @@
             })
             .then(r => r.json())
             .then(res => {
-                if (res.error) { alert(res.error); btn.disabled = false; btn.textContent = '🚀 开始分析'; return; }
+                if (res.error) { alert(res.error); resetStartBtn(); return; }
                 currentTaskId = res.task_id;
                 connectSSE(currentTaskId);
             })
             .catch(err => {
                 alert('启动失败: ' + err);
-                btn.disabled = false;
-                btn.textContent = '🚀 开始分析';
+                resetStartBtn();
             });
         }
 
+        function resetStartBtn() {
+            const btn = document.getElementById('startBtn');
+            btn.disabled = false;
+            btn.textContent = '🚀 开始分析';
+        }
+
+        function updateElapsed() {
+            if (!startTime) return;
+            const sec = Math.floor((Date.now() - startTime) / 1000);
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            document.getElementById('elapsedTime').textContent = `⏱ ${m}:${String(s).padStart(2,'0')}`;
+        }
+
+        function resetStageBar() {
+            document.querySelectorAll('#stageBar .stage').forEach(s => s.classList.remove('active', 'done'));
+        }
+
+        function setStage(name) {
+            const stages = document.querySelectorAll('#stageBar .stage');
+            let found = false;
+            stages.forEach(s => {
+                if (s.dataset.stage === name) { s.classList.add('active'); found = true; }
+                else if (!found) { s.classList.add('done'); }
+            });
+        }
+
+        // ═══════════════ SSE ═══════════════
         function connectSSE(taskId) {
             if (eventSource) eventSource.close();
             eventSource = new EventSource('/api/progress/' + taskId);
@@ -190,24 +273,31 @@
                 if (evt.msg === 'heartbeat') return;
                 addLogEntry(evt.msg, evt.data);
 
+                // 阶段推断
+                const msg = evt.msg || '';
+                if (msg.includes('搜索') || msg.includes('search')) setStage('search');
+                if (msg.includes('提取') || msg.includes('抓取') || msg.includes('视频') || msg.includes('评论')) setStage('scrape');
+                if (msg.includes('评分') || msg.includes('意图') || msg.includes('对标') || msg.includes('AI') || msg.includes('分析')) setStage('analyze');
+                if (msg.includes('导出') || msg.includes('报告') || msg.includes('完成')) setStage('export');
+
                 if (evt.data && evt.data.done) {
                     eventSource.close();
-                    document.getElementById('startBtn').disabled = false;
-                    document.getElementById('startBtn').textContent = '🚀 开始分析';
+                    clearInterval(elapsedTimer);
+                    updateElapsed();
+                    resetStartBtn();
                     document.getElementById('spinner').style.display = 'none';
+                    setStage('export');
                     loadResults(taskId);
                 }
                 if (evt.data && evt.data.error) {
                     eventSource.close();
-                    document.getElementById('startBtn').disabled = false;
-                    document.getElementById('startBtn').textContent = '🚀 重新开始';
+                    clearInterval(elapsedTimer);
+                    resetStartBtn();
                     document.getElementById('spinner').style.display = 'none';
                 }
             };
 
-            eventSource.onerror = function() {
-                // 自动重连
-            };
+            eventSource.onerror = function() {};
         }
 
         function addLogEntry(msg, data) {
@@ -224,125 +314,237 @@
             log.scrollTop = log.scrollHeight;
         }
 
+        // ═══════════════ 加载结果 ═══════════════
         function loadResults(taskId) {
             document.getElementById('resultsPanel').classList.add('active');
 
             fetch('/api/results/' + taskId)
                 .then(r => r.json())
                 .then(data => {
-                    // Stats
-                    document.getElementById('statAccounts').textContent = data.summary.accounts;
-                    document.getElementById('statVideos').textContent = data.summary.videos;
-                    document.getElementById('statComments').textContent = data.summary.comments;
-                    document.getElementById('statKeywords').textContent = data.accounts ? data.accounts.length : 0;
-
-                    // Download buttons
-                    const bar = document.getElementById('downloadBar');
-                    bar.innerHTML = '';
-                    const files = [
-                        { type: 'report', label: '📄 Markdown 报告', cls: 'btn-primary' },
-                        { type: 'accounts', label: '📊 账号 CSV', cls: 'btn-secondary' },
-                        { type: 'videos', label: '🎬 视频 CSV', cls: 'btn-secondary' },
-                        { type: 'comments', label: '💬 评论 CSV', cls: 'btn-secondary' },
-                        { type: 'analysis', label: '🤖 分析 CSV', cls: 'btn-outline' },
-                    ];
-                    files.forEach(f => {
-                        const a = document.createElement('a');
-                        a.href = '/api/download/' + taskId + '/' + f.type;
-                        a.className = 'btn btn-sm ' + f.cls;
-                        a.textContent = f.label;
-                        a.download = '';
-                        bar.appendChild(a);
-                    });
-
-                    // Accounts table
-                    let accHtml = '<thead><tr><th>#</th><th>账号</th><th>昵称</th><th>粉丝</th><th>点赞</th><th>认证</th><th>简介</th></tr></thead><tbody>';
-                    const accounts = (data.accounts || []).sort((a,b) => (b.follower_count||0) - (a.follower_count||0));
-                    accounts.forEach((a, i) => {
-                        accHtml += '<tr>' +
-                            '<td class="rank">' + (i+1) + '</td>' +
-                            '<td><a href="https://tiktok.com/@' + (a.username||'') + '" target="_blank" style="color:var(--cyan)">@' + (a.username||'') + '</a></td>' +
-                            '<td>' + (a.nickname||'') + '</td>' +
-                            '<td class="count-badge high">' + fmtNum(a.follower_count) + '</td>' +
-                            '<td class="count-badge">' + fmtNum(a.like_count) + '</td>' +
-                            '<td>' + (a.verified ? '✅' : '-') + '</td>' +
-                            '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (a.bio||'') + '</td>' +
-                            '</tr>';
-                    });
-                    accHtml += '</tbody>';
-                    document.getElementById('accountsTable').innerHTML = accHtml;
-
-                    // Videos table
-                    let vidHtml = '<thead><tr><th>#</th><th>账号</th><th>标题</th><th>标签</th><th>👍 点赞</th><th>💬 评论</th><th>🔄 分享</th></tr></thead><tbody>';
-                    const videos = (data.videos || []).sort((a,b) => (b.digg_count||0) - (a.digg_count||0)).slice(0, 20);
-                    videos.forEach((v, i) => {
-                        const tags = (v.tags||[]).slice(0, 5).map(t => '<span class="tag-badge">#'+t+'</span>').join(' ');
-                        vidHtml += '<tr>' +
-                            '<td class="rank">' + (i+1) + '</td>' +
-                            '<td>@' + (v.account_username||'') + '</td>' +
-                            '<td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (v.desc||'') + '</td>' +
-                            '<td style="max-width:200px">' + tags + '</td>' +
-                            '<td class="count-badge high">' + fmtNum(v.digg_count) + '</td>' +
-                            '<td class="count-badge">' + fmtNum(v.comment_count) + '</td>' +
-                            '<td class="count-badge">' + fmtNum(v.share_count) + '</td>' +
-                            '</tr>';
-                    });
-                    vidHtml += '</tbody>';
-                    document.getElementById('videosTable').innerHTML = vidHtml;
-
-                    // Analysis
-                    if (data.analysis && !data.analysis.error) {
-                        let anaHtml = '';
-                        const dims = [
-                            { key: 'business_needs', label: '💼 商业需求', color: 'var(--cyan)' },
-                            { key: 'purchase_needs', label: '🛒 采购需求', color: 'var(--green)' },
-                            { key: 'pain_points', label: '😤 用户痛点', color: 'var(--accent)' },
-                        ];
-                        dims.forEach(dim => {
-                            const items = data.analysis[dim.key] || [];
-                            if (items.length === 0) return;
-                            anaHtml += '<h3 style="color:'+dim.color+';margin:16px 0 8px">' + dim.label + '</h3>';
-                            items.forEach(item => {
-                                anaHtml += '<div class="analysis-item">' +
-                                    '<div class="finding">' + (item.finding||'') + '</div>' +
-                                    '<div class="meta"><span class="priority-stars">' + '⭐'.repeat(item.priority||1) + '</span> 优先级: ' + (item.priority||0) + '/10</div>' +
-                                    '<div class="evidence">📌 证据: ' + (item.evidence||'') + '</div>' +
-                                    '<div class="suggestion">💡 建议: ' + (item.suggestion||'') + '</div>' +
-                                    '</div>';
-                            });
-                        });
-                        if (data.analysis.summary) {
-                            anaHtml += '<div class="analysis-item" style="border-color:var(--cyan)">' +
-                                '<div class="finding">📋 总结</div>' +
-                                '<div style="font-size:0.95rem;margin-top:4px">' + data.analysis.summary + '</div>' +
-                                '</div>';
-                        }
-                        document.getElementById('analysisContent').innerHTML = anaHtml || '<p style="color:var(--text-muted)">暂无分析结果</p>';
-                    } else if (data.analysis && data.analysis.error) {
-                        document.getElementById('analysisContent').innerHTML = '<p style="color:var(--accent)">AI 分析失败: ' + data.analysis.error + '</p>';
-                    } else {
-                        document.getElementById('analysisContent').innerHTML = '<p style="color:var(--text-muted)">未启用 AI 分析或未设置 API Key</p>';
-                    }
+                    renderStats(data);
+                    renderDownloads(taskId);
+                    renderReferenceTab(data);
+                    renderVideosTab(data);
+                    renderAnalysisTab(data);
                 });
         }
 
+        function renderStats(data) {
+            const refs = data.reference_videos || [];
+            const benchmarks = data.reference_benchmarks || {};
+            const tierDist = benchmarks.tier_distribution || {};
+            const sCount = (tierDist.S || 0) + (tierDist.A || 0);
+
+            const intentSummary = data.intent_summary || {};
+            const byCategory = intentSummary.by_category || {};
+            const intentTypes = Object.keys(byCategory).filter(k => (byCategory[k] || 0) > 0).length;
+
+            document.getElementById('statReference').textContent = refs.length;
+            document.getElementById('statHighGrade').textContent = sCount;
+            document.getElementById('statIntentComments').textContent = intentSummary.comments_with_intent || 0;
+            document.getElementById('statIntentTypes').textContent = intentTypes;
+        }
+
+        function renderDownloads(taskId) {
+            const bar = document.getElementById('downloadBar');
+            bar.innerHTML = '';
+            const files = [
+                { type: 'reference_videos', label: '🎯 对标参考视频 CSV', cls: 'btn-primary' },
+                { type: 'report', label: '📄 Markdown 报告', cls: 'btn-secondary' },
+                { type: 'videos', label: '🎬 视频 CSV', cls: 'btn-secondary' },
+                { type: 'comments', label: '💬 评论 CSV', cls: 'btn-secondary' },
+                { type: 'accounts', label: '📊 账号 CSV', cls: 'btn-outline' },
+                { type: 'analysis', label: '🤖 分析 CSV', cls: 'btn-outline' },
+            ];
+            files.forEach(f => {
+                const a = document.createElement('a');
+                a.href = '/api/download/' + taskId + '/' + f.type;
+                a.className = 'btn btn-sm ' + f.cls;
+                a.textContent = f.label;
+                a.download = '';
+                bar.appendChild(a);
+            });
+        }
+
+        // ═══════════════ 对标参考标签 ═══════════════
+        function renderReferenceTab(data) {
+            const refs = data.reference_videos || [];
+            const benchmarks = data.reference_benchmarks || {};
+            const intentSummary = data.intent_summary || {};
+            const byCategory = intentSummary.by_category || {};
+
+            // 意图摘要卡
+            const summaryDiv = document.getElementById('intentSummary');
+            if (Object.keys(byCategory).length > 0) {
+                const totalIntent = intentSummary.comments_with_intent || 1;
+                const catLabels = {
+                    price_inquiry: '询价', moq_inquiry: 'MOQ咨询', supplier_search: '找供应商',
+                    manufacturer_search: '找工厂', customization_request: '定制需求',
+                    sample_request: '要样品', wholesale_request: '批发询价', shipping_request: '物流咨询'
+                };
+                let barsHtml = '';
+                const sortedCats = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
+                sortedCats.forEach(([cat, count]) => {
+                    const pct = Math.round(count / totalIntent * 100);
+                    const label = catLabels[cat] || cat;
+                    barsHtml += '<div class="intent-bar-row">' +
+                        '<span class="intent-bar-label">' + label + '</span>' +
+                        '<div class="intent-bar-track"><div class="intent-bar-fill" style="width:' + pct + '%"></div></div>' +
+                        '<span class="intent-bar-count">' + count + ' (' + pct + '%)</span>' +
+                        '</div>';
+                });
+                summaryDiv.innerHTML = '<div class="card-title" style="margin-bottom:8px">📊 评论采购意图分布</div>' + barsHtml;
+                summaryDiv.style.display = 'block';
+            } else {
+                summaryDiv.style.display = 'none';
+            }
+
+            // 对标参考视频表
+            const refTable = document.getElementById('refTable');
+            const refEmpty = document.getElementById('refEmpty');
+
+            if (refs.length === 0) {
+                refTable.innerHTML = '';
+                refEmpty.textContent = '暂无通过门控的对标参考视频（需 digg≥10, comment≥5, 含采购意向评论）。尝试扩大搜索范围或更换关键词。';
+                refEmpty.style.display = 'block';
+                return;
+            }
+            refEmpty.style.display = 'none';
+
+            const catLabelsShort = {
+                price_inquiry: '询价', moq_inquiry: 'MOQ', supplier_search: '供应商',
+                manufacturer_search: '工厂', customization_request: '定制',
+                sample_request: '样品', wholesale_request: '批发', shipping_request: '物流'
+            };
+
+            let html = '<thead><tr><th>#</th><th>参考分</th><th>等级</th><th>账号</th><th>视频描述</th><th>采购意向比</th><th>意向类型</th><th>👍</th><th>💬</th></tr></thead><tbody>';
+
+            refs.forEach((v, i) => {
+                const score = v.reference_score || 0;
+                const tier = v.reference_tier || 'D';
+                const tierLabel = v.reference_tier_label || '';
+                const uname = v.account_username || '';
+                const desc = (v.desc || '无描述').substring(0, 60);
+                const intentRatio = v.purchase_intent_ratio || 0;
+                const intentPct = Math.round(intentRatio * 100);
+                const intentCount = v.purchase_intent_comments || 0;
+                const totalComments = v.comment_count || 0;
+                const digg = v.digg_count || 0;
+
+                // 提取该视频的意图类型
+                const vComments = []; // 无法从前端获取，用 breakdown 或留空
+                // 实际意图类型从 top_intent 字段推断（评论级数据不在此 API 返回）
+                // 这里展示参考分 breakdown 中的信息
+                const breakdown = v.reference_breakdown || {};
+
+                // 意图比颜色条
+                const barColor = intentPct >= 20 ? 'var(--green)' : intentPct >= 10 ? 'var(--orange)' : 'var(--text-dim)';
+
+                html += '<tr>' +
+                    '<td class="rank">' + (i + 1) + '</td>' +
+                    '<td class="score-cell">' + score + '</td>' +
+                    '<td><span class="tier-badge tier-' + tier + '">' + tier + '</span></td>' +
+                    '<td><a href="https://tiktok.com/@' + uname + '" target="_blank" class="user-link">@' + uname + '</a></td>' +
+                    '<td class="desc-cell" title="' + escapeHtml(v.desc || '') + '">' + escapeHtml(desc) + '</td>' +
+                    '<td class="intent-cell">' +
+                        '<div class="intent-mini-bar"><div class="intent-mini-fill" style="width:' + intentPct + '%;background:' + barColor + '"></div></div>' +
+                        '<span class="intent-ratio-text">' + intentCount + '/' + totalComments + ' (' + intentPct + '%)</span>' +
+                    '</td>' +
+                    '<td class="intent-types-cell">-</td>' +
+                    '<td class="count-badge high">' + fmtNum(digg) + '</td>' +
+                    '<td class="count-badge">' + fmtNum(totalComments) + '</td>' +
+                    '</tr>';
+            });
+
+            html += '</tbody>';
+            refTable.innerHTML = html;
+        }
+
+        // ═══════════════ 视频排行标签 ═══════════════
+        function renderVideosTab(data) {
+            const videos = data.videos || [];
+            let html = '<thead><tr><th>#</th><th>账号</th><th>描述</th><th>标签</th><th>视频评分</th><th>👍 点赞</th><th>💬 评论</th><th>🔄 分享</th><th>▶ 播放</th></tr></thead><tbody>';
+
+            videos.forEach((v, i) => {
+                const tags = (v.tags || []).slice(0, 4).map(t => '<span class="tag-badge">#' + t + '</span>').join(' ');
+                const score = v.score || 0;
+                const tier = v.tier || 'D';
+                html += '<tr>' +
+                    '<td class="rank">' + (i + 1) + '</td>' +
+                    '<td>@' + (v.account_username || '') + '</td>' +
+                    '<td class="desc-cell" title="' + escapeHtml(v.desc || '') + '">' + escapeHtml((v.desc || '').substring(0, 50)) + '</td>' +
+                    '<td class="tags-cell">' + tags + '</td>' +
+                    '<td><span class="tier-badge tier-' + tier + '">' + (v.tier_label || tier) + ' ' + (score || 0) + '</span></td>' +
+                    '<td class="count-badge high">' + fmtNum(v.digg_count) + '</td>' +
+                    '<td class="count-badge">' + fmtNum(v.comment_count) + '</td>' +
+                    '<td class="count-badge">' + fmtNum(v.share_count) + '</td>' +
+                    '<td class="count-badge">' + fmtNum(v.play_count) + '</td>' +
+                    '</tr>';
+            });
+            html += '</tbody>';
+            document.getElementById('videosTable').innerHTML = html;
+        }
+
+        // ═══════════════ AI 分析标签 ═══════════════
+        function renderAnalysisTab(data) {
+            const analysis = data.analysis;
+            const container = document.getElementById('analysisContent');
+
+            if (!analysis || analysis.error) {
+                container.innerHTML = '<p style="color:var(--text-muted)">' +
+                    (analysis && analysis.error ? 'AI 分析失败: ' + analysis.error : '未启用 AI 分析或未设置 API Key') +
+                    '</p>';
+                return;
+            }
+
+            let html = '';
+            const dims = [
+                { key: 'business_needs', label: '💼 商业需求', color: 'var(--cyan)' },
+                { key: 'purchase_needs', label: '🛒 采购需求', color: 'var(--green)' },
+                { key: 'pain_points', label: '😤 用户痛点', color: 'var(--accent)' },
+            ];
+            dims.forEach(dim => {
+                const items = analysis[dim.key] || [];
+                if (items.length === 0) return;
+                html += '<h3 style="color:' + dim.color + ';margin:16px 0 8px">' + dim.label + '</h3>';
+                items.forEach(item => {
+                    html += '<div class="analysis-item">' +
+                        '<div class="finding">' + (item.finding || '') + '</div>' +
+                        '<div class="meta"><span class="priority-stars">' + '⭐'.repeat(item.priority || 1) + '</span> 优先级: ' + (item.priority || 0) + '/10</div>' +
+                        '<div class="evidence">📌 证据: ' + (item.evidence || '') + '</div>' +
+                        '<div class="suggestion">💡 建议: ' + (item.suggestion || '') + '</div>' +
+                        '</div>';
+                });
+            });
+            if (analysis.summary) {
+                html += '<div class="analysis-item" style="border-color:var(--cyan)">' +
+                    '<div class="finding">📋 总结</div>' +
+                    '<div style="font-size:0.95rem;margin-top:4px">' + analysis.summary + '</div>' +
+                    '</div>';
+            }
+            container.innerHTML = html || '<p style="color:var(--text-muted)">暂无分析结果</p>';
+        }
+
+        // ═══════════════ 标签切换 ═══════════════
         function switchTab(name) {
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            document.querySelector('.tab-btn[onclick*="'+name+'"]').classList.add('active');
-            document.getElementById('tab-'+name).classList.add('active');
+            document.querySelector('.tab-btn[onclick*="' + name + '"]').classList.add('active');
+            document.getElementById('tab-' + name).classList.add('active');
         }
 
+        // ═══════════════ 工具函数 ═══════════════
         function fmtNum(n) {
             if (n == null || n === 0) return '0';
             n = parseInt(n);
-            if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
-            if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
-            if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+            if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+            if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
             return n.toLocaleString();
         }
 
         function escapeHtml(s) {
+            if (!s) return '';
             const d = document.createElement('div');
             d.textContent = s;
             return d.innerHTML;

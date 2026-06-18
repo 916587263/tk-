@@ -1747,6 +1747,75 @@ class TikTokScraper:
 
         return []
 
+    # ───────────────────── P0 视频预筛选 ─────────────────────
+
+    @staticmethod
+    def _load_prefilter_config() -> dict:
+        """从 config.yaml 加载 video_prefilter 配置（不含 yaml 依赖时回退默认值）"""
+        try:
+            import yaml
+            cfg_path = Path(__file__).parent.parent / "config.yaml"
+            if cfg_path.exists():
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                    return data.get("video_prefilter", {})
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _apply_video_prefilter(videos: list[dict], config: dict = None) -> tuple[list[dict], list[dict]]:
+        """P0 视频预筛选：在评论抓取前过滤低质量视频。
+
+        根据 config.yaml → video_prefilter 配置，过滤掉互动数据不达标的视频。
+        减少无效 API 调用和分析管道的计算浪费。
+
+        Args:
+            videos: 待筛选视频列表（需含 digg_count, comment_count, play_count）
+            config: 全局配置 dict（可选），优先使用；为 None 则自动读取 config.yaml
+
+        Returns:
+            (kept_videos, removed_videos)
+        """
+        if config is None:
+            config = TikTokScraper._load_prefilter_config()
+        prefilter_cfg = config.get("video_prefilter", config) if isinstance(config, dict) else {}
+
+        # config 可能是 {"video_prefilter": {...}} 或直接是 video_prefilter 段
+        if "video_prefilter" in config:
+            prefilter_cfg = config["video_prefilter"]
+
+        if not prefilter_cfg.get("enabled", True):
+            return videos, []
+
+        min_digg = prefilter_cfg.get("min_digg", 10)
+        min_comments = prefilter_cfg.get("min_comments", 1)
+        min_plays = prefilter_cfg.get("min_plays", 100)
+
+        kept, removed = [], []
+        for v in videos:
+            digg = v.get("digg_count", 0) or 0
+            comments = v.get("comment_count", 0) or 0
+            plays = v.get("play_count", 0) or 0
+
+            if min_digg > 0 and digg < min_digg:
+                removed.append(v)
+                continue
+            if min_comments > 0 and comments < min_comments:
+                removed.append(v)
+                continue
+            if min_plays > 0 and plays < min_plays:
+                removed.append(v)
+                continue
+            kept.append(v)
+
+        if removed:
+            logger.info(
+                "P0 视频预筛选: %d/%d 保留 (过滤条件: digg>=%d, comment>=%d, plays>=%d)",
+                len(kept), len(videos), min_digg, min_comments, min_plays
+            )
+        return kept, removed
+
     # ───────────────────── 完整工作流 ─────────────────────
 
     async def run_analysis(
@@ -1794,27 +1863,19 @@ class TikTokScraper:
                 unique_accounts.append(a)
         all_accounts = unique_accounts
 
-        # ── 视频预筛选: 从搜索 API 结果中筛选合格视频 ──
-        qualified_from_search = []
+        # ── P0 视频预筛选: 从搜索 API 结果中筛选合格视频 ──
         if prefilter_videos:
+            # 设置 account_username（从 author_unique_id 映射）
             for v in prefilter_videos:
-                digg = v.get("digg_count", 0) or 0
-                cc = v.get("comment_count", 0) or 0
-                if digg >= 10 and cc >= 5:
-                    qualified_from_search.append(v)
-            logger.info(
-                "预筛选: %d/%d 条视频通过 (digg>=10, comment>=5)",
-                len(qualified_from_search), len(prefilter_videos)
-            )
-            # 将预筛选通过的视频加入 all_videos (后续 pipeline 处理)
-            for v in qualified_from_search:
-                uname = v.get("author_unique_id", "")
-                v["account_username"] = uname
+                v["account_username"] = v.get("author_unique_id", "")
+            qualified_from_search, _ = self._apply_video_prefilter(prefilter_videos)
             all_videos.extend(qualified_from_search)
+        else:
+            qualified_from_search = []
 
         await self._emit_progress(
             f"去重后共 {len(all_accounts)} 个账号, "
-            f"搜索预筛选 {len(qualified_from_search)}/{len(prefilter_videos)} 条视频通过"
+            f"P0预筛选 {len(qualified_from_search)}/{len(prefilter_videos)} 条搜索视频通过"
         )
 
         # 阶段2: 提取每个账号的详细信息
@@ -1847,31 +1908,14 @@ class TikTokScraper:
             videos = await self.extract_videos(username, videos_per_account, enrich_top=enrich_top)
             for v in videos:
                 v["account_username"] = username
+            # ── P0 视频预筛选: 过滤低互动视频后再加入全局列表 ──
+            videos, _ = self._apply_video_prefilter(videos)
             all_videos.extend(videos)
 
-            # 对前 N 条热门视频提取评论
+            # 对前 N 条热门视频提取评论（P0 预筛选已在 extend 前完成，此处无需重复过滤）
             top_videos = sorted(videos, key=lambda x: x.get("digg_count", 0), reverse=True)[:comments_video_count]
 
-            # ── 前置过滤层: 跳过低质量视频，减少无效 API 调用 ──
-            qualified = []
-            skipped = 0
             for v in top_videos:
-                digg = v.get("digg_count", 0) or 0
-                cc = v.get("comment_count", 0) or 0
-                if digg < 10:
-                    logger.debug("前置过滤: %s 点赞=%s < 10, 跳过评论抓取", v.get("id"), digg)
-                    skipped += 1
-                elif cc == 0:
-                    logger.debug("前置过滤: %s 评论=0, 跳过评论抓取", v.get("id"))
-                    skipped += 1
-                else:
-                    qualified.append(v)
-            if skipped:
-                logger.info("前置过滤: @%s 跳过 %d/%d 条低质量视频 (点赞<10 或 评论=0)",
-                            username, skipped, len(top_videos))
-            # ── 过滤结束 ──
-
-            for v in qualified:
                 vid = v.get("id", "")
                 if not vid:
                     continue

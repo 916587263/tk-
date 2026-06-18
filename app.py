@@ -500,6 +500,18 @@ def task_results(task_id):
 
     scraped = task.get("scraped_data", {})
     analysis = task.get("analysis_data", {})
+    ref_data = task.get("reference_data", {})
+    intent_data = task.get("intent_data", {})
+
+    # 构建意图摘要
+    intent_summary = {}
+    if intent_data:
+        intent_summary = {
+            "total_comments": intent_data.get("summary", {}).get("total_comments", 0),
+            "comments_with_intent": intent_data.get("summary", {}).get("comments_with_intent", 0),
+            "intent_rate": intent_data.get("summary", {}).get("intent_rate", 0),
+            "by_category": intent_data.get("summary", {}).get("by_category", {}),
+        }
 
     return jsonify({
         "summary": {
@@ -507,6 +519,10 @@ def task_results(task_id):
             "videos": scraped.get("total_videos", 0),
             "comments": scraped.get("total_comments", 0),
         },
+        "reference_videos": ref_data.get("top_reference_videos", []),
+        "reference_benchmarks": ref_data.get("reference_benchmarks", {}),
+        "intent_summary": intent_summary,
+        "viral_characteristics": scraped.get("viral_characteristics", {}),
         "accounts": scraped.get("accounts", [])[:10],
         "videos": sorted(scraped.get("videos", []), key=lambda x: x.get("digg_count", 0) or 0, reverse=True)[:20],
         "analysis": analysis,
