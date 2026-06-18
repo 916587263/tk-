@@ -17,6 +17,7 @@ from .logger import setup_logger
 from .captcha import detect_captcha, wait_for_human_intervention
 from .proxy_pool import ProxyPool
 from .checkpoint import CheckpointManager
+from .network_collector import NetworkCollector
 
 logger = setup_logger("scraper")
 
@@ -673,84 +674,83 @@ class TikTokScraper:
     async def search_accounts(
         self, keyword: str, region: str = "", max_results: int = 20
     ) -> list[dict]:
-        """根据关键词搜索 TikTok 账号"""
+        """根据关键词搜索 TikTok 账号 — 通过 XHR 拦截提取, 不依赖 DOM"""
         await self._emit_progress(f"正在搜索: {keyword} (地区: {region or '不限'})")
 
-        # 构建搜索 URL - 加入地区筛选
-        search_query = keyword
-        if region:
-            search_query = f"{keyword} {region}"
+        collector = NetworkCollector(self._page)
 
-        search_url = TIKTOK_SEARCH_URL.format(query=quote(search_query))
-        await self._page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(1.5)
+        # 先搜索视频 (触发 general/full API)
+        search_query = f"{keyword} {region}".strip() if region else keyword
+        search_videos = await collector.collect_search_videos(search_query, max_results=50)
 
-        # 检测限流
-        if await self._is_rate_limited():
-            if not await self._handle_rate_limit():
-                return []
-            # 重试：重新加载搜索页
-            await self._page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(1.5)
-        # 处理验证码
-        if not await self.handle_captcha_if_needed():
-            logger.error("搜索时验证码未解决")
-            return []
+        # 从视频作者中提取账号列表
+        accounts = self._build_accounts_from_videos(search_videos)
 
-        # 点击 "Users" / "用户" / "账号" 标签
+        # 再点击 User 标签获取详细账号信息 (补充 follower/bio 等)
         try:
-            user_tab_selectors = [
-                'span:has-text("用户")',
-                'p:has-text("用户")',
-                'p:has-text("账号")',
-                'p:has-text("Users")',
-                '[data-e2e="search-user-tab"]',
-                'div[role="tab"]:has-text("Users")',
-            ]
-            for sel in user_tab_selectors:
-                if await self._page.locator(sel).count() > 0:
-                    await self._page.locator(sel).first.click()
-                    await asyncio.sleep(2)
-                    break
+            api_accounts = await collector.collect_search_accounts(search_query, max_results=max_results)
+            # 合并: API 账号数据更全 (follower/bio), 用 API 数据覆盖
+            api_map = {a["username"]: a for a in api_accounts if a.get("username")}
+            for acc in accounts:
+                uname = acc.get("username", "")
+                if uname in api_map:
+                    api_data = api_map[uname]
+                    # API 数据优先 (含 follower_count, bio)
+                    for key in ("nickname", "bio", "follower_count", "like_count",
+                                "sec_uid", "uid", "verified"):
+                        if api_data.get(key):
+                            acc[key] = api_data[key]
+            # 添加 API 中有但视频作者中没有的账号
+            existing = {a["username"] for a in accounts}
+            for a in api_accounts:
+                if a["username"] not in existing:
+                    accounts.append(a)
         except Exception as e:
-            logger.warning("切换到用户标签失败: %s", e)
+            logger.warning("搜索账号补充失败: %s", e)
 
-        # 滚动加载更多
-        accounts = []
-        scroll_attempts = 0
-        max_scrolls = (max_results // 5) + 5
+        # 限流检测
+        if await self._is_rate_limited():
+            await self._handle_rate_limit()
 
-        while len(accounts) < max_results and scroll_attempts < max_scrolls:
-            # 提取当前可见账号
-            new_accounts = await self._extract_search_accounts()
-            for acc in new_accounts:
-                if acc not in accounts:
-                    accounts.append(acc)
-
-            if len(accounts) >= max_results:
-                break
-
-            # 滚动
-            await self._page.evaluate("window.scrollBy(0, 800)")
-            await self._sleep_with_jitter()
-            scroll_attempts += 1
-
-            if not await self.handle_captcha_if_needed():
-                break
-
-            if await self._is_rate_limited():
-                if not await self._handle_rate_limit():
-                    break
-
-        logger.info("搜索到 %d 个账号", len(accounts))
-        # 成功获取数据，重置退避
+        logger.info("搜索到 %d 个账号 (来自 %d 条视频)", len(accounts), len(search_videos))
         self._backoff_level = 0
 
         await self._emit_progress(
-            f"搜索完成: 找到 {len(accounts)} 个账号",
-            {"accounts_found": len(accounts)}
+            f"搜索完成: 找到 {len(accounts)} 个账号, {len(search_videos)} 条视频",
+            {"accounts_found": len(accounts), "videos_found": len(search_videos)}
         )
         return accounts[:max_results]
+
+    @staticmethod
+    def _build_accounts_from_videos(videos: list[dict]) -> list[dict]:
+        """从视频列表中提取唯一作者, 构建初始账号列表"""
+        seen = set()
+        accounts = []
+        for v in videos:
+            uname = v.get("author_unique_id", "")
+            if uname and uname not in seen:
+                seen.add(uname)
+                accounts.append({
+                    "username": uname,
+                    "nickname": v.get("author_nickname", ""),
+                    "avatar": "",
+                    "verified": False,
+                    "follower_count": 0,
+                    "following_count": 0,
+                    "video_count": 0,
+                    "like_count": 0,
+                    "bio": "",
+                    "sec_uid": v.get("author_sec_uid", ""),
+                    "uid": "",
+                    "url": f"https://www.tiktok.com/@{uname}",
+                })
+        return accounts
+
+    async def _search_videos_api(self, keyword: str, region: str = "", max_results: int = 50) -> list[dict]:
+        """通过 API 拦截搜索视频 — 独立方法, 供 run_analysis 预筛选使用"""
+        collector = NetworkCollector(self._page)
+        search_query = f"{keyword} {region}".strip() if region else keyword
+        return await collector.collect_search_videos(search_query, max_results=max_results)
 
     async def _extract_search_accounts(self) -> list[dict]:
         """从搜索结果页提取账号列表"""
@@ -934,9 +934,15 @@ class TikTokScraper:
                         "url": url,
                     }
 
-            # 备用：从 DOM 提取
+            # 备用：从 NetworkCollector 提取
             if not info:
-                info = await self._extract_account_from_dom(username, url)
+                try:
+                    collector = NetworkCollector(self._page)
+                    detail = await collector.collect_account_detail(username)
+                    if detail:
+                        info = detail
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.error("提取账号 %s 信息失败: %s", username, e)
@@ -947,51 +953,6 @@ class TikTokScraper:
             self.checkpoint.mark_scraped("account_info", ck_key, info)
 
         logger.info("账号 @%s: 粉丝=%s, 点赞=%s", username, info.get("follower_count", "?"), info.get("like_count", "?"))
-        return info
-
-    async def _extract_account_from_dom(self, username: str, url: str) -> dict:
-        """从 DOM 提取账号信息（新 TikTok UI，不使用 SIGI_STATE）"""
-        import re
-        info = {"username": username, "url": url}
-        try:
-            # 方法1: H1 通常包含昵称
-            h1 = self._page.locator("h1").first
-            if await h1.count() > 0:
-                info["nickname"] = (await h1.inner_text()).strip()
-
-            # 方法2: 提取 strong 标签中的统计数据
-            # 新 TikTok 将统计数据放在 strong 标签中
-            strong_els = self._page.locator("strong")
-            strong_count = await strong_els.count()
-            stat_values = []
-            for j in range(min(strong_count, 10)):
-                try:
-                    val = (await strong_els.nth(j).inner_text()).strip()
-                    if re.match(r"[\d.,]+[KMkmbB]?万?米?", val):
-                        stat_values.append(val)
-                except Exception:
-                    pass
-            # 前三项通常为: 关注, 粉丝, 赞
-            labels = ["following_count", "follower_count", "like_count"]
-            for j in range(min(len(stat_values), len(labels))):
-                info[labels[j]] = _parse_count(stat_values[j])
-
-            # 方法3: 提取简介 — 查找 h2 中包含较长文本的元素
-            h2_els = self._page.locator("h2")
-            h2_count = await h2_els.count()
-            for j in range(h2_count):
-                try:
-                    text = (await h2_els.nth(j).inner_text()).strip()
-                    # bio 通常是较长的文本，且不是通知之类的短标签
-                    if len(text) > 20 and "通知" not in text and "关于" not in text:
-                        if "bio" not in info or len(text) > len(info.get("bio", "")):
-                            info["bio"] = text
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.error("DOM 提取账号失败: %s", e)
-
         return info
 
     # ───────────────────── 提取视频列表 ─────────────────────
@@ -1039,38 +1000,18 @@ class TikTokScraper:
                 )
                 videos = sigi_videos[:max_videos]
             else:
-                # 滚动触发懒加载
-                await self._page.evaluate("window.scrollBy(0, 800)")
-                await asyncio.sleep(2)
-
-                # 卡片计数
-                card_count = await self._page.locator('[data-e2e=\"user-post-item\"]').count()
-                logger.debug("视频卡片数: %d", card_count)
-
-                videos = []
-                scroll_count = 0
-                max_scrolls = min((max_videos // 3) + 3, 10)
-                seen_ids = set()
-
-                while len(videos) < max_videos and scroll_count < max_scrolls:
-                    new_videos = await self._extract_videos_from_page(username)
-                    for v in new_videos:
-                        vid = v.get("id", v.get("url", ""))
-                        if vid and vid not in seen_ids:
-                            seen_ids.add(vid)
-                            videos.append(v)
-
-                    if len(videos) >= max_videos:
-                        break
-
-                    await self._page.evaluate("window.scrollBy(0, 1000)")
-                    await self._sleep_with_jitter()
-                    scroll_count += 1
-
-                    if not await self.handle_captcha_if_needed():
-                        break
-
-                videos = videos[:max_videos]
+                # SIGI 未命中, 用 NetworkCollector 拦截 API
+                try:
+                    collector = NetworkCollector(self._page)
+                    api_videos = await collector.collect_account_videos(username, max_videos)
+                    if api_videos:
+                        logger.info("@%s: API 拦截提取了 %d 条视频", username, len(api_videos))
+                        videos = api_videos[:max_videos]
+                    else:
+                        videos = []
+                except Exception as e:
+                    logger.warning("@%s: API 视频提取失败: %s", username, e)
+                    videos = []
 
             # P2 增强: 按点赞数排序，仅对 Top N 进入详情页补充互动数据
             if enrich_top > 0 and videos:
@@ -1166,100 +1107,6 @@ class TikTokScraper:
 
         return videos
 
-    async def _extract_videos_from_page(self, username: str) -> list[dict]:
-        """从当前用户页提取视频列表（新 TikTok UI DOM 提取，增强版）"""
-        import re
-        videos = []
-        try:
-            # 方法1: data-e2e="user-post-item" 视频卡片
-            video_items = self._page.locator('[data-e2e="user-post-item"]')
-            count = await video_items.count()
-            for i in range(min(count, 50)):
-                try:
-                    item = video_items.nth(i)
-                    text = (await item.inner_text()) or ""
-                    text = text.strip()
-
-                    # 提取视频链接
-                    link = item.locator('a[href*="/video/"]')
-                    if await link.count() == 0:
-                        continue
-                    href = await link.first.get_attribute("href") or ""
-                    vid = href.split("/video/")[-1].split("?")[0] if "/video/" in href else ""
-                    url = f"https://www.tiktok.com{href}" if href.startswith("/") else href
-
-                    # 提取描述（从图片 alt 属性）
-                    img = item.locator("img[alt]")
-                    desc = ""
-                    if await img.count() > 0:
-                        desc = (await img.first.get_attribute("alt")) or ""
-
-                    # 提取标签（从描述中）
-                    tags = re.findall(r"#(\w+)", desc) if desc else []
-
-                    # 解析卡片文本中的数字来推断播放/互动数据
-                    # TikTok 视频卡片文本格式: "<播放量>\n<点赞数>❤️\n<评论数>💬"
-                    numbers = re.findall(r"([\d.,]+[KkMmBb]?万?米?)", text)
-                    play_count = 0
-                    digg_count = 0
-                    comment_count = 0
-
-                    # 第一个数字通常是播放量
-                    if numbers:
-                        play_count = _parse_count(numbers[0])
-
-                    # 查找点赞/评论（通过 emoji 辅助识别）
-                    digg_match = re.search(r"([\d.,]+[KkMmBb]?万?米?)\s*[❤👍💗]", text)
-                    if digg_match:
-                        digg_count = _parse_count(digg_match.group(1))
-
-                    comment_match = re.search(r"([\d.,]+[KkMmBb]?万?米?)\s*[💬🗨]", text)
-                    if comment_match:
-                        comment_count = _parse_count(comment_match.group(1))
-
-                    if vid:
-                        videos.append({
-                            "id": vid,
-                            "desc": desc.strip(),
-                            "create_time": 0,
-                            "duration": 0,
-                            "play_count": play_count,
-                            "digg_count": digg_count,
-                            "comment_count": comment_count,
-                            "share_count": 0,
-                            "url": url,
-                            "tags": tags,
-                            "music": "",
-                        })
-                except Exception:
-                    continue
-
-            # 方法2: 通用 DOM — 查找所有带 /video/ 的链接
-            if not videos:
-                link_els = self._page.locator('a[href*="/video/"]')
-                link_count = await link_els.count()
-                seen = set()
-                for i in range(min(link_count, 50)):
-                    try:
-                        href = await link_els.nth(i).get_attribute("href") or ""
-                        vid = href.split("/video/")[-1].split("?")[0] if "/video/" in href else ""
-                        if vid and vid not in seen:
-                            seen.add(vid)
-                            url = f"https://www.tiktok.com{href}" if href.startswith("/") else href
-                            videos.append({
-                                "id": vid, "desc": "", "create_time": 0,
-                                "duration": 0, "play_count": 0, "digg_count": 0,
-                                "comment_count": 0, "share_count": 0,
-                                "url": url, "tags": [], "music": "",
-                            })
-                    except Exception:
-                        continue
-
-        except Exception as e:
-            logger.error("提取视频列表失败: %s", e)
-
-        return videos
-
     async def extract_video_detail(self, username: str, video_id: str) -> Optional[dict]:
         """访问单个视频详情页，提取精确的互动数据 + 标签 + 音乐
 
@@ -1319,9 +1166,7 @@ class TikTokScraper:
                             if t.get("hashtagName")
                         ]
 
-            # 方法2: DOM 提取（fallback）
-            if not detail:
-                detail = await self._extract_video_detail_from_dom()
+            # SIGI 未命中: 不尝试 DOM (受骨架屏影响), 返回空
 
             # 保存 checkpoint
             if detail and self.checkpoint:
@@ -1680,15 +1525,11 @@ class TikTokScraper:
                 self.checkpoint.mark_scraped("comments", ck_key, {"comments": js_comments})
             return js_comments[:max_comments]
 
-        # ── 策略3: DOM 提取（最后 fallback，非 CDP 模式）──
-        logger.info("API 和 JS 均未获取到评论，尝试 DOM 提取...")
-        comments = await self._extract_comments_from_dom(video_id, max_comments)
-
+        # 所有策略均未获取到评论
+        logger.info("视频 %s: 未提取到评论 (所有策略均无数据)", video_id)
         if self.checkpoint:
-            self.checkpoint.mark_scraped("comments", ck_key, {"comments": comments})
-
-        logger.info("视频 %s: DOM 提取了 %d 条评论", video_id, len(comments))
-        return comments[:max_comments]
+            self.checkpoint.mark_scraped("comments", ck_key, {"comments": []})
+        return []
 
     async def _extract_comments_from_dom(self, video_id: str, max_comments: int = 200) -> list[dict]:
         """DOM 提取评论（传统方式，非 CDP 模式 fallback）"""
@@ -1927,15 +1768,23 @@ class TikTokScraper:
             f"开始分析: {len(keywords)} 个关键词, 目标 {len(keywords) * accounts_per_keyword} 个账号"
         )
 
-        # 阶段1: 搜索账号
+        # 阶段1: 搜索账号 + 视频预筛选
+        prefilter_videos = []  # 从搜索 API 直接获取的视频, 供预筛选
         for kw in keywords:
             await self._emit_progress(f"搜索关键词: {kw}")
             accounts = await self.search_accounts(kw, region, accounts_per_keyword)
             all_accounts.extend(accounts)
+            # 同时采集搜索视频用于预筛选
+            try:
+                search_vids = await self._search_videos_api(kw, region, max_results=50)
+                prefilter_videos.extend(search_vids)
+                logger.info("关键词 %s: 搜索 API 返回 %d 条视频", kw, len(search_vids))
+            except Exception as e:
+                logger.warning("搜索视频采集失败: %s", e)
             if self.checkpoint:
                 self.checkpoint.mark_stage(f"search_{kw}", "completed", f"找到 {len(accounts)} 个账号")
 
-        # 去重
+        # 去重账号
         seen = set()
         unique_accounts = []
         for a in all_accounts:
@@ -1945,7 +1794,28 @@ class TikTokScraper:
                 unique_accounts.append(a)
         all_accounts = unique_accounts
 
-        await self._emit_progress(f"去重后共 {len(all_accounts)} 个账号")
+        # ── 视频预筛选: 从搜索 API 结果中筛选合格视频 ──
+        qualified_from_search = []
+        if prefilter_videos:
+            for v in prefilter_videos:
+                digg = v.get("digg_count", 0) or 0
+                cc = v.get("comment_count", 0) or 0
+                if digg >= 10 and cc >= 5:
+                    qualified_from_search.append(v)
+            logger.info(
+                "预筛选: %d/%d 条视频通过 (digg>=10, comment>=5)",
+                len(qualified_from_search), len(prefilter_videos)
+            )
+            # 将预筛选通过的视频加入 all_videos (后续 pipeline 处理)
+            for v in qualified_from_search:
+                uname = v.get("author_unique_id", "")
+                v["account_username"] = uname
+            all_videos.extend(qualified_from_search)
+
+        await self._emit_progress(
+            f"去重后共 {len(all_accounts)} 个账号, "
+            f"搜索预筛选 {len(qualified_from_search)}/{len(prefilter_videos)} 条视频通过"
+        )
 
         # 阶段2: 提取每个账号的详细信息
         for i, acc in enumerate(all_accounts):
