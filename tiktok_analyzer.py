@@ -1,6 +1,6 @@
 #!/usr/bin/env py
 """
-TikTok 工厂获客分析系统 — CLI 主入口
+TikTok 外贸行业对标视频发现系统 — CLI 主入口
 
 用法:
   py tiktok_analyzer.py --keyword "non woven bag" --region US
@@ -29,6 +29,7 @@ from tiktok_analyzer.account_scorer import AccountScorer, AccountScorerConfig
 from tiktok_analyzer.video_scorer import VideoScorer, VideoFilter, VideoScorerConfig, VideoFilterConfig
 from tiktok_analyzer.viral_detector import ViralDetector, ViralDetectorConfig
 from tiktok_analyzer.intent_detector import IntentDetector, IntentDetectorConfig
+from tiktok_analyzer.reference_video_scorer import ReferenceVideoScorer, ReferenceVideoScorerConfig
 
 logger = setup_logger("cli")
 
@@ -65,7 +66,7 @@ async def main():
     keywords = [k.strip() for k in args.keyword.replace("\n", ",").split(",") if k.strip()]
     task_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    print(f"🚀 TikTok 工厂获客分析 v2.0")
+    print(f"🚀 TikTok 外贸行业对标视频发现系统 v2.0")
     print(f"   关键词: {keywords}")
     print(f"   地区: {args.region or '不限'}")
     print(f"   配置: {args.accounts}账号/关键词, {args.videos}视频/账号, {args.comments}评论/视频")
@@ -176,6 +177,16 @@ async def main():
             s = intent_data["summary"]
             emit(f"意图识别: {s['comments_with_intent']}/{s['total_comments']}条 ({s['intent_rate']:.0%})")
 
+        # ── 对标参考视频评分 ──
+        ref_data = None
+        rvs_cfg = ReferenceVideoScorerConfig(**cfg.get("reference_video_scorer", {}))
+        if rvs_cfg.enabled and all_videos and all_comments and all_accounts:
+            emit("🎯 正在对标参考视频评分...")
+            ref_scorer = ReferenceVideoScorer(rvs_cfg)
+            ref_data = ref_scorer.score_all(all_videos, all_comments, all_accounts)
+            top_list = ref_data.get("top_reference_videos", [])
+            emit(f"🎯 对标参考视频: {len(top_list)} 条通过门控 (共 {len(all_videos)} 条视频)")
+
         # 更新
         scraped_data["accounts"] = all_accounts
         scraped_data["videos"] = all_videos
@@ -183,6 +194,11 @@ async def main():
         scraped_data["total_accounts"] = len(all_accounts)
         scraped_data["total_videos"] = len(all_videos)
         scraped_data["total_comments"] = len(all_comments)
+
+        # 注入对标参考视频数据（供导出使用）
+        if ref_data:
+            scraped_data["reference_videos"] = ref_data.get("top_reference_videos", [])
+            scraped_data["reference_benchmarks"] = ref_data.get("reference_benchmarks", {})
 
         # ── P6: AI分析 ──
         analysis_data = None
@@ -217,8 +233,10 @@ async def main():
         print(f"   📊 {len(all_accounts)}账号 | 🎬 {len(all_videos)}视频 | 💬 {len(all_comments)}评论")
         if viral_data:
             print(f"   🔥 {len(viral_data['top_viral_videos'])}条爆款视频")
+        if ref_data:
+            print(f"   🎯 {len(ref_data['top_reference_videos'])}条对标参考视频")
         if intent_data:
-            print(f"   🧠 {intent_data['summary']['comments_with_intent']}条商业意图评论")
+            print(f"   🧠 {intent_data['summary']['comments_with_intent']}条采购意图评论")
         print(f"   📄 报告: {md_file}")
 
     except Exception as e:

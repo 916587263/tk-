@@ -1,6 +1,7 @@
 """
-TikTok 竞争对手分析系统 - 评论区商业意图识别器
-从评论中识别购买意向、产品询问、价格敏感、竞品对比、痛点反馈。
+TikTok 外贸行业对标视频发现系统 - 评论区采购意图识别器
+从评论中识别外贸采购意向: 价格询盘、起订量、供应商搜索、工厂搜索、
+定制需求、样品请求、批发请求、物流询问。
 
 P5 优先级。基于关键词 + 正则规则的 NLP 模块，不依赖外部 API。
 """
@@ -30,159 +31,198 @@ class IntentRule:
 # ── 意图类别及对应规则 ──
 
 INTENT_CATEGORIES: dict[str, dict] = {
-    "purchase_intent": {
-        "label": "🛒 购买意向",
-        "label_en": "Purchase Intent",
-        "description": "明确表示想购买、下单、入手",
+    # ── 8 大外贸采购意图类别 ──
+    "price_inquiry": {
+        "label": "💰 价格询盘",
+        "label_en": "Price Inquiry",
+        "description": "询问价格、报价、FOB/CIF/出厂价",
         "rules": [
-            IntentRule(["where can i buy", "where to buy", "i need this", "i want this",
-                        "take my money", "shut up and take", "how much is", "price of this",
-                        "link to buy", "order this", "purchase",
-                        # B2B/工厂获客
-                        "how to order", "minimum order", "moq", "wholesale",
-                        "factory price", "bulk order", "send quote", "send me quote",
-                        "catalog", "catalogue", "sample order", "want to buy",
-                        "looking for supplier", "need supplier", "become distributor",
-                        "import", "export to", "ship to my country", "do you ship",
-                        "place order", "how can i order", "price list"], regex=False),
-            IntentRule(["哪里买", "怎么买", "多少钱", "想要", "好想要", "想入手",
-                        "下单", "求链接", "有链接吗", "哪里能买", "在哪买",
-                        "我要买", "买买买", "链接发一下", "求购", "代购",
-                        "这个卖吗", "怎么卖", "售价", "价格多少",
-                        # B2B/工厂获客
-                        "怎么订货", "起订量", "批发价", "出厂价", "大量采购",
-                        "发报价", "有目录吗", "样品", "打样", "做代理",
-                        "怎么拿货", "货源", "厂家", "工厂", "供应商",
-                        "发一下价格", "报价单", "最小起订", "货代",
-                        "怎么合作", "想批发", "跨境电商", "外贸"], regex=False),
-            IntentRule(["link.*(product|buy|shop)", "where.*(buy|get|purchase|find)"],
-                       regex=True, weight=1.5),
+            IntentRule(["how much", "price please", "best price", "price list",
+                        "quote me", "send quote", "fob price", "exw price",
+                        "cif price", "unit price", "per piece", "per kg",
+                        "per ton", "whats the price", "cost per", "factory price",
+                        "wholesale price", "bulk price", "what is the cost",
+                        "price for this", "landed cost", "what price",
+                        "give me price", "need price", "price inquiry"], regex=False),
+            IntentRule(["多少钱", "什么价格", "报个价", "报价", "出厂价",
+                        "批发价", "FOB价", "什么价", "价格多少", "询价",
+                        "发一下价格", "报价单", "价格表", "求报价",
+                        "多少钱一吨", "多少钱一公斤", "多少钱一个",
+                        "单价", "含税价", "不含税", "美金价",
+                        "人民币价格", "给个价格", "价位"], regex=False),
+            IntentRule([r"(what|how)\s+(much|price|cost)", r"price\s+(for|of|per)\s",
+                        r"\$\s*\d+", r"\d+\s*(dollars|usd|yuan|rmb| bucks)"],
+                       regex=True, weight=1.2),
         ],
     },
-    "product_inquiry": {
-        "label": "❓ 产品询问",
-        "label_en": "Product Inquiry",
-        "description": "询问产品细节、规格、使用方法、成分",
+    "moq_inquiry": {
+        "label": "📦 起订量询问",
+        "label_en": "MOQ Inquiry",
+        "description": "询问最小起订量、起批量",
         "rules": [
-            IntentRule(["does this work", "is this good", "how to use", "what is this",
-                        "what brand", "which product", "can i use", "is it worth",
-                        "does it have", "ingredients", "size of", "color option",
-                        "is this safe", "does it come with",
-                        # B2B/工厂获客
-                        "what material", "specification", "custom size", "oem",
-                        "custom logo", "private label", "whats the weight",
-                        "capacity", "thickness", "gsm", "what material used",
-                        "custom design", "your own brand", "production time",
-                        "lead time", "certification", "quality standard",
-                        "can you make", "do you manufacture"], regex=False),
-            IntentRule(["好用吗", "有用吗", "效果怎么样", "适合什么肤质", "什么成分",
-                        "安全吗", "孕妇能用吗", "敏感肌能用吗", "怎么用", "使用方法",
-                        "是什么牌子", "哪个牌子", "多大容量", "有几个颜色",
-                        "会不会过敏", "能祛痘吗", "能美白吗", "好用不",
-                        "推荐吗", "值得买吗", "效果好吗", "有用过吗",
-                        # B2B/工厂获客
-                        "什么材质", "什么材料", "规格", "尺寸", "厚度",
-                        "能不能定制", "可以印logo吗", "打样要多久",
-                        "有没有现货", "交期多久", "生产周期", "重量多少",
-                        "承重", "环保吗", "什么工艺", "可以做OEM吗"], regex=False),
-            IntentRule([r"(what|which)\s+(brand|product|one)", r"how\s+(to|do|does).*\buse\b",
-                        r"(does|is|can)\s+(this|it)\s+\w+", r"recommend\s+(a|me|some)\s+\w+"],
-                       regex=True),
+            IntentRule(["moq", "minimum order", "minimum quantity", "min order",
+                        "smallest order", "minimum purchase", "how many minimum",
+                        "what is the moq", "minimum order quantity", "min qty",
+                        "moq price", "can i order small", "small order ok",
+                        "lowest quantity", "low moq", "start quantity",
+                        "how many pieces minimum", "how much minimum",
+                        "whats your moq", "any moq"], regex=False),
+            IntentRule(["起订量", "最小起订", "最少订多少", "MOQ多少",
+                        "起批量", "最小起订量", "最少要订多少", "最低起订",
+                        "可以少订吗", "小批量可以吗", "几件起订",
+                        "多少起批", "混批可以吗", "可以混批吗",
+                        "最少订多少件", "最小批量", "最低订购量"], regex=False),
+            IntentRule([r"moq\s*[\?:]?\s*\d*", r"minimum\s+(order|quantity)",
+                        r"min(imum)?\s+(order|qty|quantity)"],
+                       regex=True, weight=1.3),
         ],
     },
-    "price_sensitivity": {
-        "label": "💰 价格敏感",
-        "label_en": "Price Sensitivity",
-        "description": "关注价格、抱怨太贵、询问折扣、比价",
+    "supplier_search": {
+        "label": "🔍 供应商搜索",
+        "label_en": "Supplier Search",
+        "description": "寻找供应商、货源、合作伙伴",
         "rules": [
-            IntentRule(["too expensive", "overpriced", "waste of money", "not worth the price",
-                        "cheaper", "discount", "coupon", "promo code", "affordable",
-                        "costs too much", "rip off", "price drop", "on sale",
-                        "better price", "cheaper alternative",
-                        # B2B/工厂获客
-                        "fob price", "exw", "cif", "shipping cost", "freight",
-                        "container price", "bulk price", "wholesale price",
-                        "unit price", "per piece", "per kg", "per ton",
-                        "landed cost", "customs duty", "tax", "vat"], regex=False),
-            IntentRule(["太贵了", "买不起", "不值这个价", "有优惠吗", "打折",
-                        "便宜点", "有没有便宜的", "性价比", "好贵", "太贵",
-                        "有没有活动", "什么时候降价", "有券吗", "羊毛",
-                        "平替", "平替有吗", "贵是贵", "真贵",
-                        # B2B/工厂获客
-                        "FOB价", "出厂价多少", "含税吗", "运费多少",
-                        "海运", "空运", "集装箱", "一个柜", "整柜",
-                        "批发什么价", "量大优惠吗", "含运费吗",
-                        "报关", "退税", "到岸价"], regex=False),
-            IntentRule([r"\$\d+", r"\d+\s?(dollars|bucks|yuan|块钱|元)",
-                        r"(discount|coupon|promo)\s+code", r"\d+%\s?off"],
-                       regex=True, weight=1.5),
+            IntentRule(["looking for supplier", "need supplier", "any supplier",
+                        "find supplier", "reliable supplier", "trusted supplier",
+                        "genuine supplier", "verified supplier", "supplier for",
+                        "who supplies", "source this", "where to source",
+                        "need vendor", "looking for vendor", "recommend supplier",
+                        "good supplier", "best supplier", "supplier contact",
+                        "long term supplier", "partner supplier"], regex=False),
+            IntentRule(["找供应商", "求供应商", "货源", "找货源", "谁家有货",
+                        "靠谱供应商", "推荐供应商", "供应商推荐", "长期合作",
+                        "有没有供应商", "谁家做", "有做这个的吗", "供货商",
+                        "寻找供应商", "供应商联系", "供应商信息",
+                        "有没有做", "谁在做", "哪个供应商"], regex=False),
+            IntentRule([r"(looking|searching)\s+for\s+(supplier|vendor|source)",
+                        r"(need|want|find)\s+(a\s+)?(supplier|vendor|source)"],
+                       regex=True, weight=1.2),
         ],
     },
-    "comparison": {
-        "label": "⚖️ 竞品对比",
-        "label_en": "Competitor Comparison",
-        "description": "与其他品牌/产品对比，替代品询问",
+    "manufacturer_search": {
+        "label": "🏭 工厂搜索",
+        "label_en": "Manufacturer Search",
+        "description": "寻找工厂、厂家直销、制造商",
         "rules": [
-            IntentRule(["vs", "versus", "compared to", "better than", "or should i get",
-                        "instead of", "alternative to", "similar to", "dup for",
-                        "which is better", "difference between"], regex=False),
-            IntentRule(["比起", "对比", "选哪个", "哪个更好", "有什么区别",
-                        "替代", "纠结", "二选一", "还是买", "不如买", "更推荐哪个",
-                        "哪家好", "哪家强", "有别的厂家吗", "其他供应商",
-                        "有没有更好的", "还有别的吗"], regex=False),
-            IntentRule([r"跟.*比", r"和.*比.*哪个", r"还是.*好", r"和.*对比",
-                        r"哪个.*(好|强|便宜|划算)", r".*还是.*的.*好"],
-                       regex=True),
-            IntentRule([r"(\w+)\s+vs\.?\s+(\w+)", r"which\s+(one|is)\s+(better|best)",
-                        r"difference\s+between", r"(or|vs)\s+(the\s+)?\w+\s*$"],
-                       regex=True),
+            IntentRule(["manufacturer", "factory direct", "direct factory",
+                        "looking for factory", "need factory", "find factory",
+                        "who manufactures", "who makes this", "made by who",
+                        "where is this manufactured", "factory price direct",
+                        "source factory", "original manufacturer", "manufacturing",
+                        "factory in china", "chinese factory", "direct manufacturer",
+                        "not from reseller", "factory contact", "factory visit",
+                        "from factory directly", "no middleman"], regex=False),
+            IntentRule(["工厂", "厂家", "厂家直销", "源头工厂", "生产厂家",
+                        "哪个工厂", "谁家工厂", "找工厂", "求工厂",
+                        "工厂直供", "工厂直接", "不是二道贩子", "生产商",
+                        "制造商", "代工厂", "原厂", "工厂地址", "工厂联系",
+                        "有工厂吗", "是工厂吗", "工厂直销", "一手货源",
+                        "自有工厂", "工厂批发", "没有中间商"], regex=False),
+            IntentRule([r"(factory|manufacturer|manufacturing)\s+(direct|price|in)",
+                        r"(who|where)\s+(manufactures?|makes?|produces?)",
+                        r"(made|manufactured)\s+(by|in)"],
+                       regex=True, weight=1.3),
         ],
     },
-    "pain_point": {
-        "label": "😤 用户痛点",
-        "label_en": "Pain Point",
-        "description": "使用体验差、质量问题、售后投诉、效果不满意",
+    "customization_request": {
+        "label": "🎨 定制需求",
+        "label_en": "Customization Request",
+        "description": "询问定制、OEM、贴牌、改设计",
         "rules": [
-            IntentRule(["doesn't work", "broke after", "waste of", "disappointed",
-                        "terrible", "horrible", "do not buy", "don't buy",
-                        "scam", "fake", "poor quality", "defective", "allergic",
-                        "side effect", "return policy", "customer service"], regex=False),
-            IntentRule(["不好用", "没效果", "用了之后", "过敏了", "烂脸",
-                        "差评", "千万别买", "别买", "踩雷", "雷品",
-                        "不好", "垃圾", "后悔", "浪费", "假货",
-                        "质量差", "坏了", "退货", "客服", "售后",
-                        "失望", "被坑", "智商税", "没用", "骗人"], regex=False),
-            IntentRule([r"(don'?t|do\s+not|never)\s+(buy|use|recommend)",
-                        r"(broke|broken|damaged)\s+(after|in|within)",
-                        r"(waste|worst|terrible|horrible)\s+(product|item|purchase)"],
-                       regex=True, weight=1.5),
+            IntentRule(["oem", "odm", "custom logo", "custom design", "custom size",
+                        "custom color", "custom packaging", "private label",
+                        "own brand", "my brand", "branding", "custom print",
+                        "personalized", "custom made", "customized", "customize",
+                        "can you customize", "do you make custom", "custom order",
+                        "bespoke", "tailor made", "white label", "your brand",
+                        "print my logo", "logo on product", "custom specification",
+                        "modify design", "change design", "special size"], regex=False),
+            IntentRule(["定制", "定做", "OEM", "ODM", "贴牌", "代工",
+                        "印logo", "加logo", "自定义", "来样加工", "来图加工",
+                        "可定制吗", "能不能定制", "可以定制吗", "支持定制吗",
+                        "改设计", "换包装", "订制", "专版", "开模",
+                        "自己的品牌", "打自己logo", "换标", "改颜色",
+                        "特殊规格", "非标定制", "个性化", "小批量定制",
+                        "按需定制", "怎么定制", "定制流程"], regex=False),
+            IntentRule([r"(custom|personalized?|bespoke|tailor)\s*(made|designed?|logo|brand|order|size|packaging)",
+                        r"(can|do)\s+you\s+(customize|make|custom|do)\s",
+                        r"(your|my|own)\s+(logo|brand|design|label)"],
+                       regex=True, weight=1.2),
         ],
     },
-    "recommendation_request": {
-        "label": "🙋 推荐请求",
-        "label_en": "Recommendation Request",
-        "description": "求推荐、求建议、请求帮助决策",
+    "sample_request": {
+        "label": "📋 样品请求",
+        "label_en": "Sample Request",
+        "description": "索要样品、样板、确认品质",
         "rules": [
-            IntentRule(["any recommendations", "what do you recommend", "suggest",
-                        "should i get", "help me choose", "advice", "opinion",
-                        "what would you", "looking for", "need suggestions",
-                        # B2B/工厂获客
-                        "reliable supplier", "trusted factory", "trusted manufacturer",
-                        "good factory", "recommended supplier", "any factory",
-                        "looking for manufacturer", "need partner", "long term",
-                        "direct factory", "source factory", "genuine supplier",
-                        "verified supplier", "who makes", "who manufactures"], regex=False),
-            IntentRule(["求推荐", "推荐一下", "有什么好的", "有没有推荐的",
-                        "建议买哪个", "帮我选", "大家觉得", "求分享",
-                        "有人用过吗", "谁能推荐", "种草", "安利",
-                        "有没有人", "想入", "该不该买", "会不会踩雷",
-                        # B2B/工厂获客
-                        "靠谱的厂家", "有没有靠谱的", "谁家做得好",
-                        "推荐个供应商", "哪家靠谱", "有合作过的吗",
-                        "谁家有做", "求靠谱工厂", "有没有工厂推荐"], regex=False),
-            IntentRule([r"(any|some)\s+(recommendations?|suggestions?)",
-                        r"(what|which)\s+(should|would)\s+(i|you)\s+(get|buy|choose)"],
-                       regex=True),
+            IntentRule(["send sample", "sample available", "sample request",
+                        "request sample", "need sample", "sample order",
+                        "get sample", "how to get sample", "sample cost",
+                        "free sample", "sample price", "sample fee",
+                        "can you send sample", "sample before order",
+                        "sample lead time", "sample shipping",
+                        "want sample", "check sample", "sample quality",
+                        "production sample", "pre-production sample"], regex=False),
+            IntentRule(["样品", "样板", "打样", "拿样", "寄样",
+                        "索样", "要样品", "能寄样品吗", "样品费",
+                        "免费样品", "样品免费", "先看样品", "样品确认",
+                        "付样品费", "样品运费", "可以先拿样吗",
+                        "寄个样品", "提供样品", "看样", "要个样品",
+                        "怎么拿样品", "样品怎么样", "有没有样品"], regex=False),
+            IntentRule([r"(send|get|need|want|request)\s+(a\s+)?sample",
+                        r"sample\s+(available|request|order|cost|price|shipping)"],
+                       regex=True, weight=1.2),
+        ],
+    },
+    "wholesale_request": {
+        "label": "📊 批发请求",
+        "label_en": "Wholesale Request",
+        "description": "询问批发、大量采购、代理经销",
+        "rules": [
+            IntentRule(["wholesale", "bulk order", "bulk buy", "bulk purchase",
+                        "large quantity", "bulk price", "distributor", "distribution",
+                        "reseller", "resell", "become distributor", "agent wanted",
+                        "wholesale price list", "bulk discount", "volume discount",
+                        "wholesaler", "dealership", "franchise", "stock lot",
+                        "in bulk", "wholesale inquiry", "bulk inquiry",
+                        "buy in bulk", "order large", "container load"], regex=False),
+            IntentRule(["批发", "大量采购", "批发价", "代理", "经销",
+                        "批量", "整柜", "走量", "拿货", "批发商",
+                        "想做代理", "招代理吗", "怎么代理", "可以做代理吗",
+                        "大量要", "批发什么价", "批发行吗", "能不能批发",
+                        "想批发", "怎么批发", "代理价", "分销",
+                        "整批", "大批量", "长期大量", "一次拿多少"], regex=False),
+            IntentRule([r"(wholesale|bulk)\s+(price|order|buy|purchase|inquiry)",
+                        r"(become|be)\s+(a\s+)?(distributor|agent|reseller|dealer)",
+                        r"(large|big|huge)\s+(quantity|order|volume)"],
+                       regex=True, weight=1.2),
+        ],
+    },
+    "shipping_request": {
+        "label": "🚢 物流询问",
+        "label_en": "Shipping Request",
+        "description": "询问运输、运费、发货国家、时效",
+        "rules": [
+            IntentRule(["ship to", "shipping to", "delivery to", "send to",
+                        "ship worldwide", "international shipping", "freight",
+                        "shipping cost", "delivery time", "shipping time",
+                        "how long to ship", "do you ship to", "can you ship to",
+                        "express delivery", "air freight", "sea freight",
+                        "door to door", "ddu", "ddp", "delivery to door",
+                        "shipping agent", "forwarder", "port of destination",
+                        "shipping method", "what courier", "tracking number",
+                        "arrive at", "transit time", "customs clearance"], regex=False),
+            IntentRule(["发货", "运费", "物流", "快递", "运输",
+                        "能发到", "可以发", "海运", "空运", "铁路运输",
+                        "多少钱运费", "运费多少", "包运费吗", "含运费吗",
+                        "到门", "到港", "清关", "报关", "时效",
+                        "多久到", "几天到", "能发货吗", "发什么快递",
+                        "可以走海运吗", "整柜", "拼柜", "到岸", "到付",
+                        "门到门", "双清", "双清包税", "关税"], regex=False),
+            IntentRule([r"(ship|deliver|send)\s+(to|worldwide|international)",
+                        r"(shipping|delivery|freight)\s+(cost|time|method|to)",
+                        r"(do|can)\s+you\s+(ship|deliver|send)\s+(to|worldwide)"],
+                       regex=True, weight=1.2),
         ],
     },
 }
@@ -385,7 +425,7 @@ class IntentDetector:
         }
 
     def get_insights(self, analysis_result: dict) -> list[str]:
-        """从意图分析结果生成可读的商业洞察"""
+        """从意图分析结果生成可读的外贸采购洞察"""
         insights = []
         summary = analysis_result.get("summary", {})
 
@@ -393,26 +433,31 @@ class IntentDetector:
             return insights
 
         intent_rate = summary.get("intent_rate", 0)
+        total_intent = summary.get("comments_with_intent", 0)
         if intent_rate > 0.3:
-            insights.append(f"🔥 高商业意图率 ({intent_rate:.0%}): 评论区有强烈购买/询问信号")
+            insights.append(f"🔥 高采购意图率 ({intent_rate:.0%}): {total_intent} 条评论含询盘/采购信号")
         elif intent_rate > 0.1:
-            insights.append(f"📈 适度商业意图 ({intent_rate:.0%}): 存在可转化的潜在客户")
+            insights.append(f"📈 适度采购意图 ({intent_rate:.0%}): {total_intent} 条评论含潜在采购意向")
         else:
-            insights.append(f"📉 商业意图较弱 ({intent_rate:.0%}): 评论区偏向娱乐/社交互动")
+            insights.append(f"📉 采购意图较少 ({intent_rate:.0%}): 评论偏向互动/娱乐，可优化内容引导询盘")
 
         counts = summary.get("category_counts", {})
 
-        if counts.get("purchase_intent", 0) > 5:
-            insights.append(f"🛒 {counts['purchase_intent']} 条明确购买意向 — 建议优先关注对应产品")
-        if counts.get("product_inquiry", 0) > 10:
-            insights.append(f"❓ {counts['product_inquiry']} 条产品询问 — 考虑制作FAQ/科普内容")
-        if counts.get("price_sensitivity", 0) > 5:
-            insights.append(f"💰 {counts['price_sensitivity']} 条价格敏感评论 — 可能需要定价策略调整")
-        if counts.get("pain_point", 0) > 5:
-            insights.append(f"😤 {counts['pain_point']} 条用户痛点 — 产品改进/差评应对机会")
-        if counts.get("comparison", 0) > 3:
-            insights.append(f"⚖️ {counts['comparison']} 条竞品对比 — 了解竞争对手差异化优势")
-        if counts.get("recommendation_request", 0) > 5:
-            insights.append(f"🙋 {counts['recommendation_request']} 条推荐请求 — 种草/KOL合作机会")
+        if counts.get("price_inquiry", 0) > 3:
+            insights.append(f"💰 {counts['price_inquiry']} 条价格询盘 — 建议在视频/简介明确标注价格区间或联系方式")
+        if counts.get("moq_inquiry", 0) > 2:
+            insights.append(f"📦 {counts['moq_inquiry']} 条起订量询问 — 建议视频中明确标注MOQ/Accept small order")
+        if counts.get("supplier_search", 0) > 3:
+            insights.append(f"🔍 {counts['supplier_search']} 条供应商搜索 — 增强品牌/工厂背景展示，提高信任度")
+        if counts.get("manufacturer_search", 0) > 3:
+            insights.append(f"🏭 {counts['manufacturer_search']} 条工厂搜索 — 强调工厂实拍/生产线/质检流程")
+        if counts.get("customization_request", 0) > 3:
+            insights.append(f"🎨 {counts['customization_request']} 条定制需求 — 明确展示OEM/ODM/贴牌能力")
+        if counts.get("sample_request", 0) > 2:
+            insights.append(f"📋 {counts['sample_request']} 条样品请求 — 在简介添加拿样流程/样品政策")
+        if counts.get("wholesale_request", 0) > 3:
+            insights.append(f"📊 {counts['wholesale_request']} 条批发请求 — 强调大批量折扣/代理政策")
+        if counts.get("shipping_request", 0) > 3:
+            insights.append(f"🚢 {counts['shipping_request']} 条物流询问 — 在视频/简介说明主要出口国家/运输方式")
 
         return insights

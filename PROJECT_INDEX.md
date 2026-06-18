@@ -1,4 +1,4 @@
-# TikTok 工厂获客分析系统 — 项目索引
+# TikTok 外贸行业对标视频发现系统 — 项目索引
 
 ## 入口
 
@@ -16,8 +16,9 @@
 | `tiktok_analyzer/account_scorer.py` | 账号评分(P1) | account{} | +score/tier/breakdown |
 | `tiktok_analyzer/video_scorer.py` | 视频评分+过滤(P3) | video{} | +score/tier/virality |
 | `tiktok_analyzer/viral_detector.py` | 爆款发现 | videos[]+accounts[] | top_viral+benchmarks |
-| `tiktok_analyzer/intent_detector.py` | 评论意图识别(P5) | comments[] | +intents/has_intent |
-| `tiktok_analyzer/exporter.py` | CSV/MD导出 | scraped_data | accounts/videos/comments/viral CSV + report.md |
+| `tiktok_analyzer/intent_detector.py` | 外贸采购意图识别(P5) | comments[] | +intents/has_intent (8类外贸意图) |
+| `tiktok_analyzer/reference_video_scorer.py` | 对标参考评分 | videos[]+comments[]+accounts[] | +reference_score/tier/breakdown + top_reference |
+| `tiktok_analyzer/exporter.py` | CSV/MD导出 | scraped_data | accounts/videos/comments/reference_videos CSV + report.md |
 | `tiktok_analyzer/checkpoint.py` | SQLite断点续爬 | task_id | 进度+已抓取标记 |
 | `tiktok_analyzer/proxy_pool.py` | 代理池轮换 | proxies.json | proxy config |
 | `tiktok_analyzer/captcha.py` | 验证码检测 | page | True/False |
@@ -30,8 +31,9 @@
   → extract_account_info() → account{}
   → extract_videos() → videos[]
   → extract_comments() → comments[]
+  → 前置过滤层(digg<10或comment=0跳过)
   → AccountFilter → AccountScorer → VideoFilter → VideoScorer
-  → ViralDetector → IntentDetector
+  → ViralDetector → IntentDetector → ReferenceVideoScorer
   → TikTokAnalyzer → export_csv/markdown
 ```
 
@@ -44,9 +46,10 @@
 4. VideoFilter (P3)
 5. VideoScorer (P3)
 6. ViralDetector
-7. IntentDetector (P5)
-8. TikTokAnalyzer (P6)
-9. Exporter
+7. IntentDetector (8类外贸采购意图)
+8. ReferenceVideoScorer (四维对标参考评分 + 门控过滤)
+9. TikTokAnalyzer (P6)
+10. Exporter
 ```
 
 ## 数据库
@@ -72,18 +75,35 @@ id, desc, create_time, duration, play_count, digg_count, comment_count,
 share_count, url, tags[], account_username, music
 + score, tier, tier_label, virality, score_breakdown (from VideoScorer)
 + engagement_rank, is_viral, is_global_top10, engagement_percentile (from ViralDetector)
++ purchase_intent_comments, purchase_intent_ratio, reference_score,
+  reference_tier, reference_tier_label, reference_breakdown,
+  is_top_reference, reference_rank (from ReferenceVideoScorer)
 ```
 
 ### comment
 ```
 video_id, text, username, likes, time, account_username
 + intents[], has_intent, top_intent, top_intent_confidence (from IntentDetector)
+  意图类别: price_inquiry, moq_inquiry, supplier_search, manufacturer_search,
+           customization_request, sample_request, wholesale_request, shipping_request
+```
+
+## 对标参考评分公式
+
+```
+reference_score = sigmoid_compress(
+  0.25 * video_engagement + 0.25 * comment_quality +
+  0.35 * intent_ratio + 0.15 * account_relevance
+)
+
+硬性门控: digg>=10 AND comment>=5 AND purchase_intent_comments>0
+不达标视频不评分，不进入 reference_videos.csv
 ```
 
 ## 遗留问题
 
-1. 评论DOM提取在CDP模式下为0 → 需网络拦截方案
-2. 视频互动数据需访问详情页(enrich_top)
+1. ✅ 评论网络拦截 — `page.on("response")` 被动拦截 comment/list XHR (2026-06-18)
+2. ✅ 视频互动数据 — `enrich_top: 20` SIGI_STATE 精确数据 (已验证)
 3. 非CDP模式反爬检测严格
 
 ## 配置热区
@@ -91,3 +111,5 @@ video_id, text, username, likes, time, account_username
 - `config.yaml → account_filter.enabled` — 开启账号过滤
 - `config.yaml → video_scraping.enrich_top` — 视频详情深度抓取数量
 - `config.yaml → account_scorer.follower_benchmark` — B2B评分基准
+- `config.yaml → reference_video_scorer.intent_ratio_benchmark` — 采购意向基准
+- `config.yaml → intent_detector.enabled_categories` — 8类外贸意图开关

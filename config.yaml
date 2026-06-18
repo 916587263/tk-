@@ -1,5 +1,5 @@
 # ============================================================
-# TikTok 竞争对手分析系统 - 配置文件
+# TikTok 外贸行业对标视频发现系统 - 配置文件
 # 所有过滤、评分、意图检测参数均可在此调整
 # 修改后下次启动分析自动生效，无需重启 Web 服务
 # ============================================================
@@ -93,19 +93,56 @@ viral_detector:
   tag_frequency_top_n: 20           # 高频标签取前 N
   engagement_benchmark_percentiles: [25, 50, 75]  # 互动率分位数
 
-# ── P5: 商业意图检测 ──
+# ── P5: 外贸采购意图检测 ──
 intent_detector:
   enabled: true
   min_confidence: 0.3
   max_intents_per_comment: 3
   enabled_categories:            # 启用的意图类别
-    - purchase_intent
-    - product_inquiry
-    - price_sensitivity
-    - comparison
-    - pain_point
-    - recommendation_request
-  custom_keywords: {}            # 用户自定义关键词，如 {"purchase_intent": ["我要这个", "给我链接"]}
+    - price_inquiry
+    - moq_inquiry
+    - supplier_search
+    - manufacturer_search
+    - customization_request
+    - sample_request
+    - wholesale_request
+    - shipping_request
+  custom_keywords: {}            # 用户自定义关键词，如 {"price_inquiry": ["how much per unit", "unit cost"]}
+
+# ── 对标参考视频评分 ──
+reference_video_scorer:
+  enabled: true
+  weight_video_engagement: 0.25     # 视频互动质量（复用 VideoScorer 得分）
+  weight_comment_quality: 0.25      # 评论质量（深度/率/长度）
+  weight_intent_ratio: 0.35         # 采购意向评论占比（核心维度）
+  weight_account_relevance: 0.15    # 账号行业相关度（bio/tags关键词命中）
+  reference_tier_thresholds:        # 对标等级阈值
+    S: 80
+    A: 60
+    B: 40
+    C: 20
+  top_reference_n: 20               # 输出 Top N 对标参考视频
+  intent_ratio_benchmark: 0.10      # 采购意向占比基准（10%=50分）
+  comment_quality_benchmark_rate: 0.02  # 评论率基准（2%=50分）
+  comment_quality_min_length: 10    # 评论最小有效长度（字符）
+  industry_keywords:                # 外贸行业关键词（账号行业相关度匹配）
+    - factory
+    - manufacturer
+    - supplier
+    - wholesale
+    - export
+    - factory direct
+    - oem
+    - manufacturing
+    - production
+    - 工厂
+    - 厂家
+    - 供应商
+    - 批发
+    - 外贸
+    - 生产
+    - 制造
+    - 出口
 
 # ── P6: AI 分析增强 ──
 ai_analysis:

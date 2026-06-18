@@ -1,5 +1,5 @@
 """
-TikTok 竞争对手分析系统 - Flask Web 应用
+TikTok 外贸行业对标视频发现系统 - Flask Web 应用
 """
 import json
 import queue
@@ -22,6 +22,7 @@ from tiktok_analyzer.account_scorer import AccountScorer, AccountScorerConfig
 from tiktok_analyzer.video_scorer import VideoScorer, VideoFilter, VideoScorerConfig, VideoFilterConfig
 from tiktok_analyzer.intent_detector import IntentDetector, IntentDetectorConfig
 from tiktok_analyzer.viral_detector import ViralDetector, ViralDetectorConfig
+from tiktok_analyzer.reference_video_scorer import ReferenceVideoScorer, ReferenceVideoScorerConfig
 
 app = Flask(__name__)
 app.secret_key = "tiktok-analyzer-secret-key-2024"
@@ -309,6 +310,27 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
                     emit(f"  {insight}")
             _active_tasks[task_id]["intent_data"] = intent_data
 
+        # ── 对标参考视频评分 ──
+        ref_data = None
+        rvs_cfg_dict = cfg.get("reference_video_scorer", {})
+        rvs_cfg = ReferenceVideoScorerConfig(**rvs_cfg_dict)
+        if rvs_cfg.enabled and all_videos and all_comments and all_accounts:
+            emit("🎯 正在对标参考视频评分...")
+            ref_scorer = ReferenceVideoScorer(rvs_cfg)
+            ref_data = ref_scorer.score_all(all_videos, all_comments, all_accounts)
+            top_list = ref_data.get("top_reference_videos", [])
+            emit(f"🎯 对标参考视频: {len(top_list)} 条通过门控 (共 {len(all_videos)} 条视频)")
+            if top_list:
+                summaries = []
+                for i, v in enumerate(top_list[:5]):
+                    summaries.append(
+                        f"#{i+1} @{v.get('account_username','')}: "
+                        f"参考分{v.get('reference_score',0)} "
+                        f"(采购意向{v.get('purchase_intent_ratio',0):.0%})"
+                    )
+                emit(f"  对标 Top 5: {' | '.join(summaries)}")
+            _active_tasks[task_id]["reference_data"] = ref_data
+
         # 更新 scraped_data
         scraped_data["accounts"] = all_accounts
         scraped_data["videos"] = all_videos
@@ -322,6 +344,12 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
             vd = _active_tasks[task_id]["viral_data"]
             scraped_data["viral_characteristics"] = vd.get("viral_characteristics", {})
             scraped_data["global_benchmarks"] = vd.get("global_benchmarks", {})
+
+        # 注入对标参考视频数据（供导出使用）
+        if _active_tasks[task_id].get("reference_data"):
+            rd = _active_tasks[task_id]["reference_data"]
+            scraped_data["reference_videos"] = rd.get("top_reference_videos", [])
+            scraped_data["reference_benchmarks"] = rd.get("reference_benchmarks", {})
 
         # ═══════════════════════════════════════════════════════════
         # P6: AI 分析（传入评分和意图数据增强分析质量）

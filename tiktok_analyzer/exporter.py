@@ -1,5 +1,5 @@
 """
-TikTok 竞争对手分析系统 - CSV / Markdown 报告导出
+TikTok 外贸行业对标视频发现系统 - CSV / Markdown 报告导出
 """
 import csv
 import json
@@ -76,10 +76,13 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
         has_scores = any(v.get("score") is not None for v in scraped_data.get("videos", []))
         header = ["账号", "视频ID", "标题/文案", "标签", "播放量", "点赞数", "评论数", "分享数", "时长(秒)", "音乐", "链接"]
         has_viral = any(v.get("engagement_rank") is not None for v in scraped_data.get("videos", []))
+        has_reference = any(v.get("reference_score") is not None for v in scraped_data.get("videos", []))
         if has_scores:
             header.extend(["综合评分", "等级", "病毒系数"])
         if has_viral:
             header.extend(["账号内排名", "是否爆款", "互动率百分位"])
+        if has_reference:
+            header.extend(["采购意向评论数", "采购意向占比", "对标参考评分", "对标等级"])
         writer.writerow(header)
         for v in scraped_data.get("videos", []):
             row = [
@@ -106,6 +109,13 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
                     v.get("engagement_rank", ""),
                     "是" if v.get("is_viral") else "否",
                     v.get("engagement_percentile", ""),
+                ])
+            if has_reference:
+                row.extend([
+                    v.get("purchase_intent_comments", 0),
+                    f"{v.get('purchase_intent_ratio', 0):.2%}" if v.get("purchase_intent_ratio") is not None else "",
+                    v.get("reference_score", ""),
+                    v.get("reference_tier", ""),
                 ])
             writer.writerow(row)
     files["videos"] = str(vid_file)
@@ -164,20 +174,22 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
                     ])
         files["analysis"] = str(ana_file)
 
-    # 5. 爆款视频 CSV（全局 Top N）
+    # 5. 对标参考视频 CSV（按 reference_score 排序，通过门控的 Top N）
     all_videos = scraped_data.get("videos", [])
-    viral_videos = [v for v in all_videos if v.get("is_global_top10")]
-    if viral_videos:
-        viral_file = out_dir / "viral_videos.csv"
-        with open(viral_file, "w", newline="", encoding="utf-8-sig") as f:
+    reference_videos = [v for v in all_videos if v.get("is_top_reference")]
+    if reference_videos:
+        ref_file = out_dir / "reference_videos.csv"
+        with open(ref_file, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "排名", "账号", "视频ID", "描述", "播放量", "点赞数", "评论数",
-                "分享数", "互动率", "综合评分", "等级", "病毒系数", "标签", "链接"
+                "分享数", "互动率", "综合评分", "等级", "病毒系数",
+                "采购意向评论数", "采购意向占比", "对标参考评分", "对标等级",
+                "标签", "链接"
             ])
-            for v in viral_videos:
+            for v in reference_videos:
                 writer.writerow([
-                    v.get("global_rank", ""),
+                    v.get("reference_rank", ""),
                     v.get("account_username", ""),
                     v.get("id", ""),
                     (v.get("desc") or "")[:100],
@@ -189,10 +201,14 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
                     v.get("score", ""),
                     v.get("tier", ""),
                     v.get("virality", ""),
+                    v.get("purchase_intent_comments", 0),
+                    f"{v.get('purchase_intent_ratio', 0):.2%}" if v.get("purchase_intent_ratio") is not None else "",
+                    v.get("reference_score", ""),
+                    v.get("reference_tier", ""),
                     ",".join(v.get("tags", [])),
                     v.get("url", ""),
                 ])
-        files["viral_videos"] = str(viral_file)
+        files["reference_videos"] = str(ref_file)
 
     logger.info("CSV 文件已导出到: %s", out_dir)
     return files
@@ -209,7 +225,7 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
     md_file = out_dir / "report.md"
     lines = []
 
-    lines.append(f"# TikTok 竞争对手分析报告")
+    lines.append(f"# TikTok 外贸行业对标视频发现报告")
     lines.append(f"")
     lines.append(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"")
@@ -280,8 +296,32 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
         )
     lines.append(f"")
 
-    # ── 爆款视频 TOP 10 ──
+    # ── 对标参考视频 TOP N ──
     all_videos = scraped_data.get("videos", [])
+    reference_videos = sorted(
+        [v for v in all_videos if v.get("is_top_reference")],
+        key=lambda x: x.get("reference_score", 0), reverse=True
+    )
+    if reference_videos:
+        lines.append(f"## 🎯 对标参考视频 TOP {len(reference_videos)}")
+        lines.append(f"")
+        lines.append(f"> 通过门控 (点赞≥10, 评论≥5, 存在采购意向) 的高参考价值视频，适合运营团队对标模仿。")
+        lines.append(f"")
+        lines.append(f"| 排名 | 账号 | 描述 | 播放 | 点赞 | 评论 | 分享 | 互动率 | 参考评分 | 采购意向占比 | 等级 |")
+        lines.append(f"|------|------|------|------|------|------|------|--------|----------|------------|------|")
+        for v in reference_videos:
+            desc = (v.get("desc") or "")[:50].replace("|", "/")
+            er = v.get("_engagement_rate", 0)
+            lines.append(
+                f"| {v.get('reference_rank', '')} | @{v.get('account_username', '')} | {desc} | "
+                f"{_fmt_count(v.get('play_count', 0))} | {_fmt_count(v.get('digg_count', 0))} | "
+                f"{_fmt_count(v.get('comment_count', 0))} | {_fmt_count(v.get('share_count', 0))} | "
+                f"{er:.1%} | {v.get('reference_score', '')} | {v.get('purchase_intent_ratio', 0):.1%} | "
+                f"{v.get('reference_tier', '')} |"
+            )
+        lines.append(f"")
+
+    # ── 爆款视频 TOP N ──
     viral_videos = [v for v in all_videos if v.get("is_global_top10")]
     if viral_videos:
         lines.append(f"## 🔥 爆款视频 TOP {len(viral_videos)}")
@@ -400,6 +440,32 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
     for tag, cnt in top_tags:
         lines.append(f"- `#{tag}` ({cnt} 次)")
     lines.append(f"")
+
+    # ── 采购意向分析 ──
+    reference_vids = [v for v in all_videos if v.get("reference_score")]
+    if reference_vids:
+        lines.append(f"## 🧠 采购意向分析")
+        lines.append(f"")
+        intent_total = sum(v.get("purchase_intent_comments", 0) for v in reference_vids)
+        comment_total = sum(v.get("comment_count", 0) for v in reference_vids)
+        lines.append(f"- **对标参考视频数**: {len(reference_vids)} 条")
+        lines.append(f"- **含采购意向评论数**: {intent_total} 条")
+        lines.append(f"- **采购意向占比**: {intent_total / max(comment_total, 1):.1%}")
+        lines.append(f"")
+        # 按采购意向占比排序的 Top 5
+        by_intent = sorted(reference_vids, key=lambda x: x.get("purchase_intent_ratio", 0), reverse=True)[:5]
+        lines.append(f"### 采购意向最高的视频")
+        lines.append(f"")
+        lines.append(f"| # | 账号 | 描述 | 采购意向评论 | 采购意向占比 | 参考评分 |")
+        lines.append(f"|---|------|------|------------|------------|----------|")
+        for i, v in enumerate(by_intent, 1):
+            desc = (v.get("desc") or "")[:40].replace("|", "/")
+            lines.append(
+                f"| {i} | @{v.get('account_username', '')} | {desc} | "
+                f"{v.get('purchase_intent_comments', 0)} | {v.get('purchase_intent_ratio', 0):.1%} | "
+                f"{v.get('reference_score', '')} |"
+            )
+        lines.append(f"")
 
     # 评论热词
     lines.append(f"## 💬 评论关键词")
