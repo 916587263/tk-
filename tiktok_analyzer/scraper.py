@@ -253,6 +253,7 @@ class TikTokScraper:
         self._backoff_level = 0      # 当前退避级别（0=正常，每遇限流+1）
         self._max_backoff = 6        # 最大退避级别
         self._current_proxy = None  # 当前使用的代理
+        self._cancelled = False     # 用户取消标志
 
     @staticmethod
     def _is_network_error(err_msg: str) -> bool:
@@ -269,6 +270,11 @@ class TikTokScraper:
     async def _emit_progress(self, msg: str, data: dict = None):
         if self.progress_callback:
             await self.progress_callback(msg, data or {})
+
+    def cancel(self):
+        """设置取消标志，run_analysis() 将在下一个检查点停止"""
+        self._cancelled = True
+        logger.info("用户请求取消，将在下一个检查点停止...")
 
     def _random_delay(self) -> float:
         """Return jittered delay with backoff"""
@@ -371,18 +377,15 @@ class TikTokScraper:
         self._browser = await self._playwright.chromium.connect_over_cdp(
             f"http://127.0.0.1:{cdp_port}"
         )
-        # 获取已存在的 context，创建新页面（避免与用户操作冲突）
+        # 复用浏览器默认 context，只创建一页 — 不 new_context()（会在用户桌面弹出新窗口）
+        # 原则：整个抓取过程复用同一个 page，不调 new_page()，用户眼里只有一个标签页
         contexts = self._browser.contexts
-        if contexts:
-            self._context = contexts[0]
-        else:
-            self._context = await self._browser.new_context()
-        # 始终创建新页面，避免与用户正在浏览的页面冲突
+        self._context = contexts[0] if contexts else await self._browser.new_context()
         self._page = await self._context.new_page()
 
         # CDP 模式下同样注入 stealth（防护层）
         await self._page.add_init_script(STEALTH_JS)
-        await self._emit_progress("CDP 浏览器已连接（使用真实浏览器环境）")
+        await self._emit_progress("CDP 浏览器已连接（单页复用，不干扰用户）")
 
     async def start_browser(self, user_data_dir: Optional[str] = None):
         """启动浏览器（persistent context 保持登录状态）"""
@@ -502,12 +505,12 @@ class TikTokScraper:
             # persistent context 模式：关闭 context（没有 browser 对象）
             await self._context.close()
         elif getattr(self, '_cdp_mode', False):
-            # CDP 模式：断开连接（用户浏览器保持运行）
+            # CDP 模式：关闭抓取页面，保留用户浏览器和 context
             logger.info("CDP 模式：断开连接（用户浏览器保持运行）")
         elif self._browser and self._context:
             # 普通 browser 模式：context 由 browser 管理，关闭 browser 即可
             pass
-        if self._browser:
+        if self._browser and not getattr(self, '_cdp_mode', False):
             try:
                 await self._browser.close()
             except Exception:
@@ -972,87 +975,75 @@ class TikTokScraper:
 
         await self._emit_progress(f"正在提取视频: @{username} (目标 {max_videos} 条)")
 
-        # 临时切换到新页面提取视频，避免旧页面状态影响
-        old_page = self._page
-        self._page = await self._context.new_page()
-        try:
-            url = TIKTOK_USER_URL.format(username=username)
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2)
+        # 不复用 new_page() — CDP 模式下每次 new_page() 都会在用户浏览器创建新标签页
+        # 直接导航现有页面，单页复用 — CDP 模式下不调 new_page()
+        url = TIKTOK_USER_URL.format(username=username)
+        await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(2)
 
-            if await self._is_rate_limited():
-                if not await self._handle_rate_limit():
-                    logger.warning("限流耗尽，跳过视频提取: %s", username)
-                    return []
-                await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(1.5)
-
-            if not await self.handle_captcha_if_needed():
+        if await self._is_rate_limited():
+            if not await self._handle_rate_limit():
+                logger.warning("限流耗尽，跳过视频提取: %s", username)
                 return []
+            await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(1.5)
 
-            # P2 增强: 优先从 SIGI_STATE 提取（精度最高，含互动数据）
-            sigi_videos = await self._extract_videos_from_sigi(username)
-            if sigi_videos:
-                logger.info("@%s: SIGI 提取了 %d 条视频", username, len(sigi_videos))
-                # SIGI 数据已包含精确指标，直接返回
-                await self._emit_progress(
-                    f"视频提取完成: @{username} ({len(sigi_videos[:max_videos])} 条, SIGI 精确数据)"
-                )
-                videos = sigi_videos[:max_videos]
-            else:
-                # SIGI 未命中, 用 NetworkCollector 拦截 API
-                try:
-                    collector = NetworkCollector(self._page)
-                    api_videos = await collector.collect_account_videos(username, max_videos)
-                    if api_videos:
-                        logger.info("@%s: API 拦截提取了 %d 条视频", username, len(api_videos))
-                        videos = api_videos[:max_videos]
-                    else:
-                        videos = []
-                except Exception as e:
-                    logger.warning("@%s: API 视频提取失败: %s", username, e)
-                    videos = []
+        if not await self.handle_captcha_if_needed():
+            return []
 
-            # P2 增强: 按点赞数排序，仅对 Top N 进入详情页补充互动数据
-            if enrich_top > 0 and videos:
-                # 按 digg_count 降序排列，取前 N 条最有价值的视频进入详情页
-                sorted_by_likes = sorted(
-                    videos,
-                    key=lambda x: x.get("digg_count", 0) or 0,
-                    reverse=True
-                )
-                enrich_count = min(enrich_top, len(sorted_by_likes))
-                await self._emit_progress(
-                    f"深度补充互动数据: @{username} 点赞 Top {enrich_count} 条视频..."
-                )
-                for i in range(enrich_count):
-                    v = sorted_by_likes[i]
-                    vid = v.get("id", "")
-                    if not vid:
-                        continue
-                    detail = await self.extract_video_detail(username, vid)
-                    if detail:
-                        # merge: 详情页数据覆盖列表页（更精确）
-                        for key in ("play_count", "digg_count", "comment_count",
-                                     "share_count", "create_time", "duration",
-                                     "desc", "tags", "music"):
-                            if key in detail and detail[key]:
-                                v[key] = detail[key]
-                        logger.debug(
-                            "  点赞 #%d (digg=%s): plays=%s, comments=%s",
-                            i+1, v.get("digg_count"), v.get("play_count"), v.get("comment_count")
-                        )
-                    await self._sleep_with_jitter()
-
-            logger.info("@%s: 提取了 %d 条视频", username, len(videos))
-            return videos
-        finally:
-            # 关闭视频页，恢复旧页面
+        # P2 增强: 优先从 SIGI_STATE 提取（精度最高，含互动数据）
+        sigi_videos = await self._extract_videos_from_sigi(username)
+        if sigi_videos:
+            logger.info("@%s: SIGI 提取了 %d 条视频", username, len(sigi_videos))
+            await self._emit_progress(
+                f"视频提取完成: @{username} ({len(sigi_videos[:max_videos])} 条, SIGI 精确数据)"
+            )
+            videos = sigi_videos[:max_videos]
+        else:
+            # SIGI 未命中, 用 NetworkCollector 拦截 API
             try:
-                await self._page.close()
-            except Exception:
-                pass
-            self._page = old_page
+                collector = NetworkCollector(self._page)
+                api_videos = await collector.collect_account_videos(username, max_videos)
+                if api_videos:
+                    logger.info("@%s: API 拦截提取了 %d 条视频", username, len(api_videos))
+                    videos = api_videos[:max_videos]
+                else:
+                    videos = []
+            except Exception as e:
+                logger.warning("@%s: API 视频提取失败: %s", username, e)
+                videos = []
+
+        # P2 增强: 按点赞数排序，仅对 Top N 进入详情页补充互动数据
+        if enrich_top > 0 and videos:
+            sorted_by_likes = sorted(
+                videos,
+                key=lambda x: x.get("digg_count", 0) or 0,
+                reverse=True
+            )
+            enrich_count = min(enrich_top, len(sorted_by_likes))
+            await self._emit_progress(
+                f"深度补充互动数据: @{username} 点赞 Top {enrich_count} 条视频..."
+            )
+            for i in range(enrich_count):
+                v = sorted_by_likes[i]
+                vid = v.get("id", "")
+                if not vid:
+                    continue
+                detail = await self.extract_video_detail(username, vid)
+                if detail:
+                    for key in ("play_count", "digg_count", "comment_count",
+                                 "share_count", "create_time", "duration",
+                                 "desc", "tags", "music"):
+                        if key in detail and detail[key]:
+                            v[key] = detail[key]
+                    logger.debug(
+                        "  点赞 #%d (digg=%s): plays=%s, comments=%s",
+                        i+1, v.get("digg_count"), v.get("play_count"), v.get("comment_count")
+                    )
+                await self._sleep_with_jitter()
+
+        logger.info("@%s: 提取了 %d 条视频", username, len(videos))
+        return videos
 
     async def _extract_videos_from_sigi(self, username: str) -> list[dict]:
         """从 SIGI_STATE 提取视频列表（精度最高）"""
@@ -1448,6 +1439,148 @@ class TikTokScraper:
         )
         return comments[:max_comments]
 
+    async def _sample_comments(self, video_id: str, count: int = 8,
+                              strategy: str = "first_n") -> list[dict]:
+        """P1: 轻量评论采样 — 不导航页面，在当前页用 fetch() 直调 API
+
+        采样策略:
+          - first_n:          默认，前 N 条 (TikTok hot 排序)
+          - top_and_latest:   Top N/2 + 更深分页 N/2 (模拟 hot+recent 混合)
+          - random_from_N:    抓取 N 条，从中随机取 count 条
+          - pool_random:      先抓 pool_size 条，再随机取 count 条
+
+        对比 extract_comments():
+          - _sample_comments: ~1.5s，1-2 次 API 调用，不导航页面
+          - extract_comments:  ~10s，page.goto + 等待加载 + 分页抓取
+        """
+        try:
+            if strategy == "first_n":
+                return await self._sample_first_n(video_id, count)
+            elif strategy == "top_and_latest":
+                return await self._sample_top_and_latest(video_id, count)
+            elif strategy == "random_from_N":
+                return await self._sample_random_from_pool(video_id, count, pool_size=count)
+            elif strategy == "pool_random":
+                return await self._sample_random_from_pool(video_id, count, pool_size=max(count * 3, 30))
+            else:
+                return await self._sample_first_n(video_id, count)
+        except Exception:
+            return []
+
+    async def _sample_first_n(self, video_id: str, count: int) -> list[dict]:
+        """策略 A: 前 N 条评论 (TikTok 默认 hot 排序)"""
+        result = await self._page.evaluate("""
+            async (videoId, count) => {
+                try {
+                    const url = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=${count}&cursor=0`;
+                    const res = await fetch(url);
+                    if (!res.ok) {
+                        return {error: 'HTTP ' + res.status, url: url};
+                    }
+                    const data = await res.json();
+                    const comments = (data.comments || []).map(c => ({
+                        text: c.text || '',
+                        likes: c.digg_count || 0,
+                        username: c.user?.unique_id || '',
+                        time: c.create_time || 0,
+                    }));
+                    return {ok: true, count: comments.length, comments: comments};
+                } catch(e) {
+                    return {error: e.message || String(e)};
+                }
+            }
+        """, video_id, count)
+        if isinstance(result, dict) and "error" in result:
+            logger.warning(
+                "_sample_first_n vid=%s error: %s", video_id, result["error"]
+            )
+            return []
+        if isinstance(result, dict) and result.get("ok"):
+            if result["count"] == 0:
+                logger.info(
+                    "_sample_first_n vid=%s: API OK but 0 comments (视频可能无评论)",
+                    video_id
+                )
+            return result.get("comments", [])
+        return result if isinstance(result, list) else []
+
+    async def _sample_top_and_latest(self, video_id: str, count: int) -> list[dict]:
+        """策略 B: Top N/2 (cursor=0) + 更深分页 N/2 (cursor=N)
+
+        通过混合 hot 评论和较新/较低热度评论来增加样本多样性，
+        提高捕获偶然商业评论的概率。
+        """
+        half = max(1, count // 2)
+        result = await self._page.evaluate("""
+            async (videoId, count, half) => {
+                try {
+                    const base = 'https://www.tiktok.com/api/comment/list/'
+                               + '?aid=1988&aweme_id=' + videoId;
+                    const [topRes, laterRes] = await Promise.all([
+                        fetch(base + '&count=' + half + '&cursor=0'),
+                        fetch(base + '&count=' + (count - half) + '&cursor=' + count)
+                    ]);
+                    const topData = await topRes.json();
+                    const laterData = await laterRes.json();
+                    const top = (topData.comments || []).map(c => ({
+                        text: c.text || '', likes: c.digg_count || 0,
+                        username: c.user?.unique_id || '', time: c.create_time || 0,
+                    }));
+                    const later = (laterData.comments || []).map(c => ({
+                        text: c.text || '', likes: c.digg_count || 0,
+                        username: c.user?.unique_id || '', time: c.create_time || 0,
+                    }));
+                    return [...top, ...later];
+                } catch(e) { return []; }
+            }
+        """, video_id, count, half)
+        return result or []
+
+    async def _sample_random_from_pool(
+        self, video_id: str, count: int, pool_size: int = 30
+    ) -> list[dict]:
+        """策略 C/D: 从 pool_size 条评论中随机抽取 count 条
+
+        先抓取 pool_size 条 (cursor=0)，再在 Python 侧随机采样。
+        这避免了仅看 Top N 导致的"只看热门评论"偏差，
+        可能捕获到被热评压制的商业询盘。
+        """
+        import random as _random
+        result = await self._page.evaluate("""
+            async (videoId, poolSize) => {
+                try {
+                    const url = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=${poolSize}&cursor=0`;
+                    const res = await fetch(url);
+                    if (!res.ok) {
+                        return {error: 'HTTP ' + res.status};
+                    }
+                    const data = await res.json();
+                    const comments = (data.comments || []).map(c => ({
+                        text: c.text || '',
+                        likes: c.digg_count || 0,
+                        username: c.user?.unique_id || '',
+                        time: c.create_time || 0,
+                    }));
+                    return {ok: true, count: comments.length, comments: comments};
+                } catch(e) {
+                    return {error: e.message || String(e)};
+                }
+            }
+        """, video_id, pool_size)
+
+        if isinstance(result, dict) and "error" in result:
+            logger.warning(
+                "_sample_random_from_pool vid=%s error: %s", video_id, result["error"]
+            )
+            return []
+        if isinstance(result, dict) and result.get("ok"):
+            pool = result.get("comments", [])
+        else:
+            pool = result if isinstance(result, list) else []
+        if len(pool) <= count:
+            return pool
+        return _random.sample(pool, count)
+
     async def extract_comments(self, username: str, video_id: str, max_comments: int = 200) -> list[dict]:
         """提取单条视频的评论，返回列表（限流时可能返回空列表）
 
@@ -1764,57 +1897,93 @@ class TikTokScraper:
         return {}
 
     @staticmethod
+    @staticmethod
+    def _compute_intent_score(video: dict, comments: list[dict] = None) -> int:
+        """计算视频的购买意图评分 (0-100)。
+
+        基于视频描述 + 采样评论文本中的采购关键词命中。
+        关键词权重: buy/price/supplier/MOQ/order/link 各 +15，上限 100。
+        """
+        INTENT_KEYWORDS = {
+            "buy": 15, "purchase": 15, "order": 15, "price": 15,
+            "supplier": 15, "moq": 15, "manufacturer": 10, "factory": 10,
+            "wholesale": 10, "link": 10, "sample": 10, "shipping": 10,
+            "inquiry": 10, "quotation": 10, "export": 10, "custom": 5,
+        }
+        text_parts = [(video.get("desc") or "").lower()]
+        if comments:
+            for c in comments:
+                text_parts.append((c.get("text") or "").lower())
+        combined = " ".join(text_parts)
+
+        score = 0
+        for kw, weight in INTENT_KEYWORDS.items():
+            if kw in combined:
+                score += weight
+        return min(score, 100)
+
+    @staticmethod
     def _apply_video_prefilter(videos: list[dict], config: dict = None) -> tuple[list[dict], list[dict]]:
-        """P0 视频预筛选：在评论抓取前过滤低质量视频。
+        """P0 视频硬过滤（优先级最高）：标记质量 + 过滤低互动视频。
 
-        根据 config.yaml → video_prefilter 配置，过滤掉互动数据不达标的视频。
-        减少无效 API 调用和分析管道的计算浪费。
+        过滤规则 (任一不达标即标记为 low_quality):
+          1. likes < 10 → low_quality
+          2. comments == 0 → low_quality
+          3. likes < 10 AND comments < 3 → low_quality (无 engagement)
 
-        Args:
-            videos: 待筛选视频列表（需含 digg_count, comment_count, play_count）
-            config: 全局配置 dict（可选），优先使用；为 None 则自动读取 config.yaml
+        所有视频都会被标记 high_quality / low_quality。
+        low_quality 视频不进入后续评论抓取和分析流程。
 
         Returns:
-            (kept_videos, removed_videos)
+            (high_quality_videos, low_quality_videos)
         """
         if config is None:
             config = TikTokScraper._load_prefilter_config()
         prefilter_cfg = config.get("video_prefilter", config) if isinstance(config, dict) else {}
 
-        # config 可能是 {"video_prefilter": {...}} 或直接是 video_prefilter 段
         if "video_prefilter" in config:
             prefilter_cfg = config["video_prefilter"]
 
         if not prefilter_cfg.get("enabled", True):
+            # 即使禁用预筛选，仍标记质量
+            for v in videos:
+                v["quality"] = "high_quality"
             return videos, []
 
-        min_digg = prefilter_cfg.get("min_digg", 10)
-        min_comments = prefilter_cfg.get("min_comments", 1)
-        min_plays = prefilter_cfg.get("min_plays", 100)
+        # P0 硬过滤阈值 (不受 config 覆盖，最高优先级)
+        MIN_LIKES = prefilter_cfg.get("min_digg", 10)
+        MIN_COMMENTS = prefilter_cfg.get("min_comments", 1)
+        MIN_PLAYS = prefilter_cfg.get("min_plays", 100)
 
-        kept, removed = [], []
+        high_quality, low_quality = [], []
         for v in videos:
             digg = v.get("digg_count", 0) or 0
             comments = v.get("comment_count", 0) or 0
             plays = v.get("play_count", 0) or 0
 
-            if min_digg > 0 and digg < min_digg:
-                removed.append(v)
-                continue
-            if min_comments > 0 and comments < min_comments:
-                removed.append(v)
-                continue
-            if min_plays > 0 and plays < min_plays:
-                removed.append(v)
-                continue
-            kept.append(v)
+            # P0 硬过滤判断
+            is_low = False
+            if digg < MIN_LIKES:
+                is_low = True
+            elif comments < MIN_COMMENTS:
+                is_low = True
+            elif digg < MIN_LIKES and comments < 3:  # 无 engagement
+                is_low = True
+            elif MIN_PLAYS > 0 and plays < MIN_PLAYS:
+                is_low = True
 
-        if removed:
+            v["quality"] = "low_quality" if is_low else "high_quality"
+            if is_low:
+                low_quality.append(v)
+            else:
+                high_quality.append(v)
+
+        if low_quality:
             logger.info(
-                "P0 视频预筛选: %d/%d 保留 (过滤条件: digg>=%d, comment>=%d, plays>=%d)",
-                len(kept), len(videos), min_digg, min_comments, min_plays
+                "P0 硬过滤: %d high_quality / %d low_quality (条件: likes>=%d, comments>=%d, plays>=%d)",
+                len(high_quality), len(videos), MIN_LIKES, MIN_COMMENTS, MIN_PLAYS
             )
-        return kept, removed
+        return high_quality, low_quality
 
     # ───────────────────── 完整工作流 ─────────────────────
 
@@ -1827,122 +1996,445 @@ class TikTokScraper:
         comments_per_video: int = 200,
         comments_video_count: int = 3,
         enrich_top: int = 0,
+        # 新管道参数
+        sample_comment_count: int = 8,        # 阶段 2 采样评论数
+        comment_sampling_strategy: str = "first_n",  # first_n | top_and_latest | pool_random
+        deep_comment_count: int = 40,         # 阶段 3 深度抓取评论数
+        validation_mode: bool = False,        # 验证模式: 保留采样评论 + 返回漏斗统计
     ) -> dict:
-        """执行完整分析流程"""
-        all_accounts = []
-        all_videos = []
-        all_comments = []
+        """执行完整分析流程 (新管道)
+
+        阶段 0: 搜索 + 跨关键词去重
+        阶段 1: QuickScore 无评论快速评分 + 激进淘汰 (~70-80%)
+        阶段 2: 轻量评论采样 (8条) + QuickIntentScanner → 筛选有意图视频
+        阶段 3: 深度评论抓取 (30-50条) — 仅对 ~10% 视频
+        """
+        from .unified_scorer import QuickScorer, QuickScorerConfig
+        from .intent_detector import QuickIntentScanner
+
+        # ── 加载 QuickScorer 配置 ──
+        qs_cfg = QuickScorerConfig()
+        try:
+            import yaml
+            from pathlib import Path
+            cfg_path = Path(__file__).parent.parent / "config.yaml"
+            if cfg_path.exists():
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                    qs_data = data.get("quick_scorer", {})
+                    if qs_data:
+                        qs_cfg = QuickScorerConfig(**{
+                            k: v for k, v in qs_data.items()
+                            if k in QuickScorerConfig.__dataclass_fields__
+                        })
+        except Exception:
+            pass
+
+        quick_scorer = QuickScorer(qs_cfg)
+        quick_scanner = QuickIntentScanner(min_hits=1)
+
+        # ── 关键词上限: 最多 10 个，超出截断 ──
+        MAX_KEYWORDS = 10
+        if len(keywords) > MAX_KEYWORDS:
+            logger.warning("关键词过多 (%d)，截断为前 %d 个", len(keywords), MAX_KEYWORDS)
+            keywords = keywords[:MAX_KEYWORDS]
 
         await self._emit_progress(
             f"开始分析: {len(keywords)} 个关键词, 目标 {len(keywords) * accounts_per_keyword} 个账号"
         )
 
-        # 阶段1: 搜索账号 + 视频预筛选
-        prefilter_videos = []  # 从搜索 API 直接获取的视频, 供预筛选
+        # ═══════════════════════════════════════════════════════════
+        # 阶段 0: 搜索 + 跨关键词去重
+        # ═══════════════════════════════════════════════════════════
+        await self._emit_progress("阶段 0: 搜索 + 去重...")
+
+        all_accounts = []
+        seen_video_ids: dict[str, dict] = {}  # vid → video (存 play_count 最高的)
+        seen_accounts: dict[str, dict] = {}   # username → account
+        total_search_vids = 0
+
         for kw in keywords:
             await self._emit_progress(f"搜索关键词: {kw}")
+
+            # 搜索账号
             accounts = await self.search_accounts(kw, region, accounts_per_keyword)
-            all_accounts.extend(accounts)
-            # 同时采集搜索视频用于预筛选
+            for a in accounts:
+                uname = a.get("username", "")
+                if not uname:
+                    continue
+                if uname not in seen_accounts:
+                    seen_accounts[uname] = a
+                else:
+                    # 保留 follower 更多的版本
+                    existing = seen_accounts[uname]
+                    if a.get("follower_count", 0) > existing.get("follower_count", 0):
+                        seen_accounts[uname] = a
+
+            # 搜索视频 (带跨关键词去重)
             try:
                 search_vids = await self._search_videos_api(kw, region, max_results=50)
-                prefilter_videos.extend(search_vids)
+                total_search_vids += len(search_vids)
+                for v in search_vids:
+                    vid = v.get("id", "")
+                    if not vid:
+                        continue
+                    v["account_username"] = v.get("author_unique_id", "")
+                    if vid not in seen_video_ids:
+                        v["_source_keywords"] = [kw]
+                        seen_video_ids[vid] = v
+                    else:
+                        # 合并来源关键词
+                        existing_kw = seen_video_ids[vid].get("_source_keywords", [])
+                        if kw not in existing_kw:
+                            existing_kw.append(kw)
+                        seen_video_ids[vid]["_source_keywords"] = existing_kw
+                        # 保留 play_count 更高的版本
+                        if v.get("play_count", 0) > seen_video_ids[vid].get("play_count", 0):
+                            v["_source_keywords"] = existing_kw
+                            seen_video_ids[vid] = v
                 logger.info("关键词 %s: 搜索 API 返回 %d 条视频", kw, len(search_vids))
             except Exception as e:
                 logger.warning("搜索视频采集失败: %s", e)
+
             if self.checkpoint:
                 self.checkpoint.mark_stage(f"search_{kw}", "completed", f"找到 {len(accounts)} 个账号")
 
-        # 去重账号
-        seen = set()
-        unique_accounts = []
-        for a in all_accounts:
-            uname = a.get("username", "")
-            if uname and uname not in seen:
-                seen.add(uname)
-                unique_accounts.append(a)
-        all_accounts = unique_accounts
+            if self._cancelled:
+                await self._emit_progress("⏹ 用户取消 (搜索阶段)，返回已采集的部分数据...")
+                break
 
-        # ── P0 视频预筛选: 从搜索 API 结果中筛选合格视频 ──
-        if prefilter_videos:
-            # 设置 account_username（从 author_unique_id 映射）
-            for v in prefilter_videos:
-                v["account_username"] = v.get("author_unique_id", "")
-            qualified_from_search, _ = self._apply_video_prefilter(prefilter_videos)
-            all_videos.extend(qualified_from_search)
-        else:
-            qualified_from_search = []
+        all_accounts = list(seen_accounts.values())
+        all_search_videos = list(seen_video_ids.values())
 
         await self._emit_progress(
-            f"去重后共 {len(all_accounts)} 个账号, "
-            f"P0预筛选 {len(qualified_from_search)}/{len(prefilter_videos)} 条搜索视频通过"
+            f"阶段 0 完成: {len(all_accounts)} 个去重账号, "
+            f"{len(all_search_videos)} 条去重搜索视频 (原始 {total_search_vids} 条)"
         )
 
-        # 阶段2: 提取每个账号的详细信息
+        # ═══════════════════════════════════════════════════════════
+        # 阶段 1: QuickScore 无评论快速评分 + 激进淘汰
+        # ═══════════════════════════════════════════════════════════
+        await self._emit_progress(f"阶段 1: QuickScore 快速评分 ({len(all_search_videos)} 条搜索视频)...")
+
+        # 1a: 对搜索视频 QuickScore
+        qualified_videos, eliminated_videos = quick_scorer.score_all(
+            all_search_videos,
+            accounts={a["username"]: a for a in all_accounts},
+        )
+
+        await self._emit_progress(
+            f"QuickScore 搜索视频: {len(qualified_videos)} 通过 / {len(eliminated_videos)} 淘汰 "
+            f"({len(eliminated_videos) / max(1, len(all_search_videos)) * 100:.0f}% 淘汰率)"
+        )
+
+        # 1b: 提取账号详情
+        account_map = {a["username"]: a for a in all_accounts}
         for i, acc in enumerate(all_accounts):
             username = acc.get("username", "")
             if not username:
                 continue
 
-            await self._emit_progress(f"提取账号 ({i+1}/{len(all_accounts)}): @{username}")
+            if (i + 1) % 5 == 0:
+                await self._emit_progress(f"提取账号 ({i+1}/{len(all_accounts)}): @{username}")
 
             info = await self.extract_account_info(username)
             if info and not info.get("skipped"):
                 acc.update(info)
             elif info and info.get("skipped"):
-                logger.info("账号 %s 因限流跳过详情提取，保留搜索结果数据", username)
+                logger.info("账号 %s 因限流跳过详情提取", username)
 
             await self._sleep_with_jitter()
+            if self._cancelled:
+                await self._emit_progress("⏹ 用户取消 (账号提取阶段)，返回已采集的部分数据...")
+                break
 
         if self.checkpoint:
             self.checkpoint.mark_stage("accounts", "completed", f"完成 {len(all_accounts)} 个账号")
 
-        # 阶段3: 提取每个账号的视频
+        # 1c: 提取账号视频 + QuickScore + 跨账号去重
+        all_extracted_videos = []
+        account_videos_passed = []
+
         for i, acc in enumerate(all_accounts):
             username = acc.get("username", "")
             if not username:
                 continue
 
-            await self._emit_progress(f"提取视频 ({i+1}/{len(all_accounts)}): @{username}")
+            if (i + 1) % 3 == 0:
+                await self._emit_progress(
+                    f"提取视频 ({i+1}/{len(all_accounts)}): @{username} "
+                    f"(已通过 {len(qualified_videos) + len(account_videos_passed)} 条)"
+                )
 
             videos = await self.extract_videos(username, videos_per_account, enrich_top=enrich_top)
             for v in videos:
                 v["account_username"] = username
-            # ── P0 视频预筛选: 过滤低互动视频后再加入全局列表 ──
-            videos, _ = self._apply_video_prefilter(videos)
-            all_videos.extend(videos)
-
-            # 对前 N 条热门视频提取评论（P0 预筛选已在 extend 前完成，此处无需重复过滤）
-            top_videos = sorted(videos, key=lambda x: x.get("digg_count", 0), reverse=True)[:comments_video_count]
-
-            for v in top_videos:
                 vid = v.get("id", "")
-                if not vid:
+                # 跨账号/跨搜索去重
+                if vid and vid in seen_video_ids:
                     continue
-                comments = await self.extract_comments(username, vid, comments_per_video)
-                for c in comments:
-                    c["account_username"] = username
-                all_comments.extend(comments)
+                if vid:
+                    seen_video_ids[vid] = v
+
+                # QuickScore 每条视频
+                result = quick_scorer.score(v, acc)
+                v["quick_score"] = result.total
+                v["product_relevance"] = result.product_relevance
+                v["video_quality_score"] = result.video_quality
+                v["industry_hits"] = result.industry_hits
+                v["is_personal_account"] = result.is_personal_account
+                v["_commercial_whitelist"] = result.commercial_whitelist_hit
+
+                if result.passed:
+                    v["eliminated_reason"] = ""
+                    account_videos_passed.append(v)
+                else:
+                    v["eliminated_reason"] = result.eliminated_reason
+                    all_extracted_videos.append(v)  # 淘汰视频仅做记录
+
+            await self._sleep_with_jitter()
+            if self._cancelled:
+                await self._emit_progress("⏹ 用户取消 (视频提取阶段)，返回已采集的部分数据...")
+                break
+
+        # 合并搜索视频 + 账号视频
+        all_qualified = qualified_videos + account_videos_passed  # noqa: F821 (qualified_videos defined above)
+
+        await self._emit_progress(
+            f"阶段 1 完成: {len(all_qualified)} 条视频通过 QuickScore "
+            f"(搜索 {len(qualified_videos)} + 账号 {len(account_videos_passed)}), "
+            f"{len(eliminated_videos) + len(all_extracted_videos)} 条淘汰"
+        )
+
+        if not all_qualified:
+            await self._emit_progress("⚠ 无视频通过 QuickScore，返回空结果")
+            return {
+                "keywords": keywords, "region": region,
+                "accounts": all_accounts, "videos": [], "comments": [],
+                "low_quality_videos": eliminated_videos + all_extracted_videos,
+                "total_accounts": len(all_accounts), "total_videos": 0, "total_comments": 0,
+                "quick_score_stats": {"passed": 0, "eliminated": len(eliminated_videos) + len(all_extracted_videos)},
+            }
+
+        # ═══════════════════════════════════════════════════════════
+        # 阶段 2: 轻量评论采样 + QuickIntentScanner
+        # ═══════════════════════════════════════════════════════════
+        await self._emit_progress(
+            f"阶段 2: 轻量评论采样 ({len(all_qualified)} 条视频, "
+            f"各 {sample_comment_count} 条, 策略={comment_sampling_strategy})..."
+        )
+
+        intent_signaled = []   # 有意图 → 进入阶段 3
+        no_intent = []         # 无意图 → 仅保留采样评论
+        all_sampled_comments = []
+        _stage2_total_comments = 0
+        _stage2_total_videos = 0
+
+        for i, v in enumerate(all_qualified):
+            vid = v.get("id", "")
+            comment_count = v.get("comment_count", 0)
+            if not vid:
+                no_intent.append(v)
+                continue
+
+            if (i + 1) % 10 == 0:
+                await self._emit_progress(
+                    f"评论采样 ({i+1}/{len(all_qualified)}): "
+                    f"已发现 {len(intent_signaled)} 条有意图信号"
+                )
+
+            try:
+                sample = await self._sample_comments(
+                    vid, count=sample_comment_count,
+                    strategy=comment_sampling_strategy
+                )
+            except Exception as e:
+                logger.warning("采样评论失败 vid=%s: %s", vid, e)
+                sample = []
+
+            # —— 诊断日志: 每个视频的采样结果 ——
+            logger.info(
+                "[阶段2诊断] vid=%s comment_count=%d sampled=%d has_intent=%s",
+                vid, comment_count, len(sample),
+                quick_scanner.has_intent(sample) if sample else False
+            )
+
+            v["_sampled_comments"] = sample
+            _stage2_total_comments += len(sample)
+            _stage2_total_videos += 1
+
+            if quick_scanner.has_intent(sample):
+                intent_signaled.append(v)
+            else:
+                no_intent.append(v)
+                # 保留采样评论
+                for c in sample:
+                    c["account_username"] = v.get("account_username", "")
+                all_sampled_comments.extend(sample)
+
+            # 取消检查点
+            if (i + 1) % 10 == 0 and self._cancelled:
+                await self._emit_progress("⏹ 用户取消 (评论采样阶段)，返回已采集的部分数据...")
+                break
+
+        await self._emit_progress(
+            f"阶段 2 完成: {len(intent_signaled)} 条有意图信号 → 进入深度评论, "
+            f"{len(no_intent)} 条无意图 → 仅保留采样 "
+            f"(淘汰率 {len(no_intent) / max(1, len(all_qualified)) * 100:.0f}%)"
+        )
+        # —— 阶段 2 汇总统计 ——
+        _stage2_avg = _stage2_total_comments / max(1, _stage2_total_videos)
+        logger.info(
+            "[阶段2统计] 总视频=%d 总采样评论=%d 平均评论/视频=%.1f "
+            "有意图=%d 无意图=%d",
+            _stage2_total_videos, _stage2_total_comments, _stage2_avg,
+            len(intent_signaled), len(no_intent)
+        )
+        if _stage2_total_videos > 0 and _stage2_total_comments == 0:
+            logger.error(
+                "[阶段2异常] %d 个视频全部 0 评论！请检查: "
+                "1) _sample_comments URL 是否正确 "
+                "2) TikTok 是否限制 fetch() 调用 "
+                "3) 页面是否在正确的域名下 (tiktok.com)",
+                _stage2_total_videos
+            )
+
+        # ═══════════════════════════════════════════════════════════
+        # 阶段 3: 深度评论抓取 — 仅对意图信号视频
+        # ═══════════════════════════════════════════════════════════
+        await self._emit_progress(f"阶段 3: 深度评论抓取 ({len(intent_signaled)} 条视频, 各 {deep_comment_count} 条)...")
+
+        all_deep_comments = []
+        deep_analyzed_videos = []
+
+        for i, v in enumerate(intent_signaled):
+            vid = v.get("id", "")
+            username = v.get("account_username", "")
+            if not vid:
+                continue
+
+            if (i + 1) % 5 == 0:
+                await self._emit_progress(
+                    f"深度评论 ({i+1}/{len(intent_signaled)}): @{username}"
+                )
+
+            try:
+                comments = await self.extract_comments(username, vid, deep_comment_count)
+            except Exception as e:
+                logger.warning("深度评论抓取失败 vid=%s: %s", vid, e)
+                comments = []
+
+            # 按点赞排序
+            comments_sorted = sorted(
+                comments, key=lambda c: c.get("likes", 0) or 0, reverse=True
+            )
+            for c in comments_sorted:
+                c["account_username"] = username
+
+            # 存储深度评论到视频上 (供 CommentClassifier 使用)
+            v["_deep_comments"] = comments_sorted
+            deep_analyzed_videos.append(v)
+            all_deep_comments.extend(comments_sorted)
 
             await self._sleep_with_jitter()
 
+            if (i + 1) % 5 == 0 and self._cancelled:
+                await self._emit_progress("⏹ 用户取消 (深度评论阶段)，返回已采集的部分数据...")
+                break
+
+        await self._emit_progress(
+            f"阶段 3 完成: {len(deep_analyzed_videos)} 条视频深度分析, "
+            f"{len(all_deep_comments)} 条深度评论 "
+            f"(占原始 {len(all_qualified)} 条的 {len(deep_analyzed_videos) / max(1, len(all_qualified)) * 100:.0f}%)"
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # 合并结果
+        # ═══════════════════════════════════════════════════════════
+
+        # all_videos: QuickScore 通过的全部视频
+        all_videos_out = list(all_qualified)
+
+        # 验证模式: 保留采样评论供误杀检测
+        if validation_mode:
+            # 保留 _sampled_comments 在 no_intent 视频上
+            for v in no_intent:
+                v["_kept_sampled_comments"] = v.get("_sampled_comments", [])
+            # all_videos_out 也保留
+        else:
+            for v in all_videos_out:
+                v.pop("_sampled_comments", None)
+
+        # all_comments: 采样评论 (无意图) + 深度评论 (有意图)
+        all_comments_out = all_sampled_comments + all_deep_comments
+
         if self.checkpoint:
-            self.checkpoint.mark_stage("videos", "completed", f"完成 {len(all_videos)} 条视频")
-            self.checkpoint.mark_stage("comments", "completed", f"完成 {len(all_comments)} 条评论")
+            self.checkpoint.mark_stage("videos", "completed",
+                f"QuickScore 通过 {len(all_videos_out)} 条, 深度分析 {len(deep_analyzed_videos)} 条")
+            self.checkpoint.mark_stage("comments", "completed",
+                f"采样 {len(all_sampled_comments)} + 深度 {len(all_deep_comments)} = {len(all_comments_out)} 条评论")
+
+        # 漏斗统计
+        total_raw_search = len(all_search_videos)
+        after_dedup = len(all_search_videos)  # 已去重
+        total_account_videos = len(account_videos_passed) + len(all_extracted_videos)
+        total_raw = total_raw_search + total_account_videos
+        qs_passed = len(all_qualified)
+        qs_eliminated = len(eliminated_videos) + len(all_extracted_videos)
+
+        funnel_stats = {
+            "stage_0_raw_search": total_raw_search,
+            "stage_0_account_videos": total_account_videos,
+            "stage_0_total_raw": total_raw,
+            "stage_0_after_dedup": after_dedup + total_account_videos,
+            "stage_1_quickscore_passed": qs_passed,
+            "stage_1_quickscore_eliminated": qs_eliminated,
+            "stage_2_intent_signaled": len(intent_signaled),
+            "stage_2_no_intent": len(no_intent),
+            "stage_3_deep_analyzed": len(deep_analyzed_videos),
+            # 每层保留率
+            "qs_retention_rate": round(qs_passed / max(1, total_raw) * 100, 1),
+            "intent_retention_rate": round(len(intent_signaled) / max(1, qs_passed) * 100, 1),
+            "deep_retention_rate": round(len(deep_analyzed_videos) / max(1, len(intent_signaled)) * 100, 1),
+            # 累计转化率
+            "cumulative_to_quickscore": round(qs_passed / max(1, total_raw) * 100, 1),
+            "cumulative_to_intent": round(len(intent_signaled) / max(1, total_raw) * 100, 1),
+            "cumulative_to_deep": round(len(deep_analyzed_videos) / max(1, total_raw) * 100, 1),
+        }
 
         result = {
             "keywords": keywords,
             "region": region,
             "accounts": all_accounts,
-            "videos": all_videos,
-            "comments": all_comments,
+            "videos": all_videos_out,
+            "comments": all_comments_out,
+            # 新管道特有字段
+            "deep_analyzed_videos": deep_analyzed_videos,
+            "intent_signaled_count": len(intent_signaled),
+            "no_intent_count": len(no_intent),
+            # 验证模式: 保留无意图视频 (含采样评论) 供误杀检测
+            "no_intent_videos": no_intent if validation_mode else [],
+            "quick_score_eliminated_videos": eliminated_videos + all_extracted_videos if validation_mode else [],
+            # 漏斗统计 (始终包含)
+            "funnel_stats": funnel_stats,
+            "quick_score_stats": {
+                "passed": qs_passed,
+                "eliminated": qs_eliminated,
+                "elimination_rate": round(
+                    qs_eliminated / max(1, total_raw) * 100, 1
+                ),
+            },
+            # 向后兼容
+            "low_quality_videos": eliminated_videos + all_extracted_videos,
             "total_accounts": len(all_accounts),
-            "total_videos": len(all_videos),
-            "total_comments": len(all_comments),
+            "total_videos": len(all_videos_out),
+            "total_comments": len(all_comments_out),
         }
 
         await self._emit_progress(
-            f"数据采集完成: {result['total_accounts']} 账号, {result['total_videos']} 视频, {result['total_comments']} 评论",
+            f"数据采集完成: {result['total_accounts']} 账号, "
+            f"{result['total_videos']} 视频 (其中 {len(deep_analyzed_videos)} 深度分析), "
+            f"{result['total_comments']} 评论",
             result
         )
 

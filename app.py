@@ -17,12 +17,19 @@ from tiktok_analyzer.exporter import export_csv, export_markdown
 from tiktok_analyzer.checkpoint import CheckpointManager
 from tiktok_analyzer.proxy_pool import ProxyPool
 from tiktok_analyzer.logger import setup_logger
-from tiktok_analyzer.account_filter import AccountFilter, AccountFilterConfig
-from tiktok_analyzer.account_scorer import AccountScorer, AccountScorerConfig
-from tiktok_analyzer.video_scorer import VideoScorer, VideoFilter, VideoScorerConfig, VideoFilterConfig
-from tiktok_analyzer.intent_detector import IntentDetector, IntentDetectorConfig
-from tiktok_analyzer.viral_detector import ViralDetector, ViralDetectorConfig
-from tiktok_analyzer.reference_video_scorer import ReferenceVideoScorer, ReferenceVideoScorerConfig
+from tiktok_analyzer.keyword_expander import KeywordExpander, KeywordCache
+
+# 新管道模块
+from tiktok_analyzer.unified_scorer import FinalScorer, FinalScorerConfig
+from tiktok_analyzer.comment_classifier import CommentClassifier, CommentClassifierConfig
+
+# DEPRECATED — 旧管道模块 (保留导入避免启动报错, 不再使用)
+# from tiktok_analyzer.account_filter import AccountFilter, AccountFilterConfig
+# from tiktok_analyzer.account_scorer import AccountScorer, AccountScorerConfig
+# from tiktok_analyzer.video_scorer import VideoScorer, VideoFilter, VideoScorerConfig, VideoFilterConfig
+# from tiktok_analyzer.intent_detector import IntentDetector, IntentDetectorConfig
+# from tiktok_analyzer.viral_detector import ViralDetector, ViralDetectorConfig
+# from tiktok_analyzer.reference_video_scorer import ReferenceVideoScorer, ReferenceVideoScorerConfig
 
 app = Flask(__name__)
 app.secret_key = "tiktok-analyzer-secret-key-2024"
@@ -88,6 +95,7 @@ def start_analysis():
     openai_base_url = data.get("openai_base_url", "")
     openai_model = data.get("openai_model", "gpt-4o")
     use_ai = data.get("use_ai", True)
+    expand_tier = data.get("expand_tier", "balanced")
 
     keywords = [k.strip() for k in keywords_str.replace("\n", ",").split(",") if k.strip()]
     if not keywords:
@@ -101,6 +109,7 @@ def start_analysis():
         "status": "starting",
         "keywords": keywords,
         "region": region,
+        "expand_tier": expand_tier,
         "started_at": datetime.now().isoformat(),
     }
 
@@ -108,7 +117,7 @@ def start_analysis():
               videos_per_account, comments_per_video,
               browser, headless, cdp_port,
               openai_key, openai_base_url, openai_model, use_ai,
-              APP_CONFIG)
+              expand_tier, APP_CONFIG)
 
     thread = threading.Thread(target=_run_analysis, args=params, daemon=True)
     thread.start()
@@ -116,11 +125,58 @@ def start_analysis():
     return jsonify({"task_id": task_id, "status": "started"})
 
 
+# ═══════════════════════════════════════════════════════════
+# API: 停止分析任务
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/api/stop/<task_id>", methods=["POST"])
+def stop_analysis(task_id):
+    task = _active_tasks.get(task_id)
+    if not task:
+        return jsonify({"error": "任务不存在"}), 404
+    task["cancelled"] = True
+    # 跨线程通知 scraper 停止
+    scraper = task.get("scraper")
+    if scraper:
+        scraper.cancel()
+    logger.info("任务 %s 收到取消请求", task_id)
+    return jsonify({"status": "cancelling"})
+
+
+# ═══════════════════════════════════════════════════════════
+# API: 关键词扩展
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/api/expand", methods=["POST"])
+def expand_keywords():
+    """预览关键词扩展结果"""
+    data = request.json or {}
+    keywords_str = data.get("keywords", "")
+    tier = data.get("tier", "balanced")
+
+    keywords = [k.strip() for k in keywords_str.replace("\n", ",").split(",") if k.strip()]
+    if not keywords:
+        return jsonify({"error": "请至少输入一个关键词"}), 400
+
+    if tier not in ("compact", "balanced", "full"):
+        tier = "balanced"
+
+    cfg = APP_CONFIG.get("keyword_expansion", {})
+    cache_ttl = cfg.get("cache_ttl_days", 7)
+    limits = cfg.get("max_keywords_per_tier", None)
+
+    cache = KeywordCache(ttl_days=cache_ttl)
+    expander = KeywordExpander(cache=cache, tier_limits=limits)
+    result = expander.expand(keywords, tier=tier)
+
+    return jsonify(result)
+
+
 def _run_analysis(task_id, keywords, region, accounts_per_keyword,
                   videos_per_account, comments_per_video,
                   browser, headless, cdp_port,
                   openai_key, openai_base_url, openai_model, use_ai,
-                  config=None):
+                  expand_tier, config=None):
     cfg = config or {}
     """后台分析任务"""
     pq = _progress_queues.get(task_id)
@@ -132,6 +188,36 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
 
     async def progress_cb(msg, data=None):
         emit(msg, data)
+
+    # ── 关键词扩展 ──
+    if expand_tier and expand_tier in ("compact", "balanced", "full") and len(keywords) <= 5:
+        exp_cfg = cfg.get("keyword_expansion", {})
+        cache_ttl = exp_cfg.get("cache_ttl_days", 7)
+        limits = exp_cfg.get("max_keywords_per_tier", None)
+
+        cache = KeywordCache(ttl_days=cache_ttl)
+        expander = KeywordExpander(cache=cache, tier_limits=limits)
+        exp_result = expander.expand(keywords, tier=expand_tier)
+
+        if exp_result.get("added", 0) > 0:
+            emit(
+                f"🔑 关键词已扩展 ({expand_tier}): {len(keywords)} → {exp_result['count']} 词 "
+                f"(新增 {exp_result['added']} 词)"
+                + (f" [缓存命中]" if exp_result.get("from_cache") else "")
+            )
+            keywords = exp_result["keywords"]
+            # ── 硬上限: 最多 10 个关键词 ──
+            if len(keywords) > 10:
+                emit(f"⚠️ 扩展后关键词过多 ({len(keywords)} 个)，截断为前 10 个")
+                keywords = keywords[:10]
+            _active_tasks[task_id]["expanded_keywords"] = keywords
+            _active_tasks[task_id]["expand_tier"] = expand_tier
+    elif expand_tier and len(keywords) > 5:
+        emit(f"⚠️ 输入关键词过多 ({len(keywords)} 个)，跳过扩展（最多5个）")
+    # ── 硬上限: 未扩展的关键词也限制最多 10 个 ──
+    if len(keywords) > 10:
+        emit(f"⚠️ 关键词过多 ({len(keywords)} 个)，截断为前 10 个")
+        keywords = keywords[:10]
 
     checkpoint = CheckpointManager(task_id)
     proxy_pool = ProxyPool(check_reachable=False)
@@ -150,6 +236,9 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
         progress_callback=progress_cb,
     )
 
+    # 存储 scraper 引用，供 /api/stop 跨线程调用 cancel()
+    _active_tasks[task_id]["scraper"] = scraper
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -157,13 +246,20 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
         _active_tasks[task_id]["status"] = "running"
         emit("任务开始，正在启动浏览器...")
 
-        # 模式选择：CDP 连接 vs 独立启动
+        # 模式选择：CDP 连接 vs 独立启动（CDP 失败自动降级）
         if cdp_port and cdp_port > 0:
             emit(f"使用 CDP 连接模式 (端口 {cdp_port})，连接已有浏览器...")
-            loop.run_until_complete(scraper.connect_over_cdp(cdp_port))
+            try:
+                loop.run_until_complete(scraper.connect_over_cdp(cdp_port))
+            except Exception as cdp_err:
+                logger.warning("CDP 连接失败 (%s)，降级为独立启动", cdp_err)
+                emit(f"⚠️ CDP 连接失败 ({cdp_err})，降级为独立启动模式...")
+                loop.run_until_complete(scraper.start_browser(
+                    user_data_dir=str(USER_DATA_DIR)
+                ))
         else:
             loop.run_until_complete(scraper.start_browser(
-                user_data_dir=str(USER_DATA_DIR) if not headless else None
+                user_data_dir=str(USER_DATA_DIR)
             ))
 
         logged_in = loop.run_until_complete(scraper.ensure_logged_in())
@@ -186,179 +282,233 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
         _active_tasks[task_id]["scraped_data"] = scraped_data
 
         # ═══════════════════════════════════════════════════════════
-        # P0-P5: 过滤 + 评分 + 意图识别
+        # 新管道: CommentClassifier (阶段 3 LLM) → FinalScorer (阶段 4) → Analyzer (阶段 5)
+        # QuickScore (阶段 1) + 评论采样/深度抓取 (阶段 2-3 爬取) 已在 scraper.run_analysis() 完成
         # ═══════════════════════════════════════════════════════════
 
         all_accounts = scraped_data.get("accounts", [])
         all_videos = scraped_data.get("videos", [])
-        all_comments = scraped_data.get("comments", [])
+        all_comments = list(scraped_data.get("comments", []))
+        deep_analyzed_videos = scraped_data.get("deep_analyzed_videos", [])
 
-        # ── P0: 账号过滤 ──
-        af_cfg_dict = cfg.get("account_filter", {})
-        af_cfg = AccountFilterConfig(**af_cfg_dict)
-        if af_cfg.enabled:
-            emit(f"🔍 账号过滤启动 (条件: min_followers={af_cfg.min_followers}, "
-                 f"verified={af_cfg.require_verified}, region_wl={af_cfg.region_whitelist})...")
-            account_filter = AccountFilter(af_cfg)
-            before_af = len(all_accounts)
-            all_accounts, filtered_accounts = account_filter.filter(all_accounts)
-            if filtered_accounts:
-                emit(f"账号过滤: {before_af} → {len(all_accounts)} "
-                     f"(过滤 {len(filtered_accounts)} 个)")
-                logger.info("过滤原因分布: %s", account_filter.stats.get("reasons", {}))
-                # 同步过滤视频和评论
-                kept_usernames = {a.get("username", "") for a in all_accounts}
-                all_videos = [v for v in all_videos
-                              if v.get("account_username", "") in kept_usernames]
-                all_comments = [c for c in all_comments
-                                if c.get("account_username", "") in kept_usernames]
+        emit(
+            f"📊 管道数据: {len(all_videos)} 条通过 QuickScore, "
+            f"{len(deep_analyzed_videos)} 条深度分析 ({len(all_comments)} 条评论)"
+        )
 
-        # ── P1: 账号评分 ──
-        as_cfg_dict = cfg.get("account_scorer", {})
-        as_cfg = AccountScorerConfig(**as_cfg_dict)
-        if as_cfg.enabled and all_accounts:
-            account_scorer = AccountScorer(as_cfg)
-            all_accounts = account_scorer.score_all(all_accounts)
-            tiers = {}
-            for a in all_accounts:
-                tiers[a.get("tier", "?")] = tiers.get(a.get("tier", "?"), 0) + 1
-            top3 = [(a.get("username"), a.get("score")) for a in all_accounts[:3]]
-            emit(f"📊 账号评分完成: {tiers} | Top3: {top3}")
-
-        # ── P3: 视频过滤 ──
-        vf_cfg_dict = cfg.get("video_filter", {})
-        vf_cfg = VideoFilterConfig(**vf_cfg_dict)
-        if vf_cfg.enabled and all_videos:
-            video_filter = VideoFilter(vf_cfg)
-            before_vf = len(all_videos)
-            all_videos, _ = video_filter.filter(all_videos)
-            emit(f"🔍 视频过滤: {before_vf} → {len(all_videos)}")
-
-        # ── P3: 视频评分 ──
-        vs_cfg_dict = cfg.get("video_scorer", {})
-        vs_cfg = VideoScorerConfig(**vs_cfg_dict)
-        if vs_cfg.enabled and all_videos:
-            video_scorer = VideoScorer(vs_cfg)
-            all_videos = video_scorer.score_all(all_videos)
-            tiers = {}
-            for v in all_videos:
-                tiers[v.get("tier", "?")] = tiers.get(v.get("tier", "?"), 0) + 1
-            emit(f"📊 视频评分完成: {tiers}")
-
-            # 按账号聚合视频统计
-            account_video_stats = video_scorer.aggregate_by_account(all_videos)
-            # 将聚合统计合并到对应 account
-            for acc in all_accounts:
-                uname = acc.get("username", "")
-                if uname in account_video_stats:
-                    acc["video_stats"] = account_video_stats[uname]
-
-        # ── 爆款视频发现 ──
-        vd_cfg_dict = cfg.get("viral_detector", {})
-        vd_cfg = ViralDetectorConfig(**vd_cfg_dict)
-        if vd_cfg.enabled and all_videos:
-            emit("🔥 正在识别爆款视频...")
-            viral_detector = ViralDetector(vd_cfg)
-            viral_data = viral_detector.analyze(all_videos, all_accounts)
-
-            # 将 viral_profile 合并到对应 account
-            for acc in all_accounts:
-                uname = acc.get("username", "")
-                if uname in viral_data["per_account"]:
-                    acc["viral_profile"] = viral_data["per_account"][uname]
-
-            _active_tasks[task_id]["viral_data"] = viral_data
-
-            # 输出 Top 摘要
-            top_list = viral_data["top_viral_videos"]
-            if top_list:
-                summaries = []
-                for i, v in enumerate(top_list[:5]):
-                    er = v.get("_engagement_rate", 0)
-                    summaries.append(
-                        f"#{i+1} @{v.get('account_username','')}: "
-                        f"互动率{er:.1%}"
-                    )
-                emit(f"🔥 爆款 Top {len(top_list)}: {' | '.join(summaries)}")
-            emit(f"📊 全局基准: 平均互动率 {viral_data['global_benchmarks'].get('avg_engagement_rate', 0):.1%}, "
-                 f"爆款占比 {viral_data['global_benchmarks'].get('viral_ratio', 0):.0%}")
-
-            # 特征摘要
-            chars = viral_data.get("viral_characteristics", {})
-            if chars.get("common_tags"):
-                top_tags = [t["tag"] for t in chars["common_tags"][:5]]
-                emit(f"🧬 爆款高频标签: {', '.join(['#'+t for t in top_tags])}")
-            if chars.get("optimal_duration_range"):
-                dr = chars["optimal_duration_range"]
-                emit(f"⏱ 爆款最优时长: {dr[0]}s - {dr[1]}s")
-
-        # ── P5: 商业意图识别 ──
+        # ── 阶段 3: LLM 评论意图分类 (批量, 3-5 次调用) ──
+        classify_map = {}  # {video_id: VideoClassifyResult}
         intent_data = None
-        intent_cfg_dict = cfg.get("intent_detector", {})
-        intent_cfg = IntentDetectorConfig(**intent_cfg_dict)
-        if intent_cfg.enabled and all_comments:
-            emit("🧠 正在识别评论商业意图...")
-            intent_detector = IntentDetector(intent_cfg)
-            intent_data = intent_detector.analyze_comments(all_comments)
-            all_comments = intent_data["comments"]  # 已被原地修改
-            insights = intent_detector.get_insights(intent_data)
-            emit(f"意图识别: {intent_data['summary']['comments_with_intent']}/"
-                 f"{intent_data['summary']['total_comments']} 条评论含商业意图 "
-                 f"({intent_data['summary']['intent_rate']:.0%})")
-            if insights:
-                for insight in insights:
-                    emit(f"  {insight}")
-            _active_tasks[task_id]["intent_data"] = intent_data
 
-        # ── 对标参考视频评分 ──
-        ref_data = None
-        rvs_cfg_dict = cfg.get("reference_video_scorer", {})
-        rvs_cfg = ReferenceVideoScorerConfig(**rvs_cfg_dict)
-        if rvs_cfg.enabled and all_videos and all_comments and all_accounts:
-            emit("🎯 正在对标参考视频评分...")
-            ref_scorer = ReferenceVideoScorer(rvs_cfg)
-            ref_data = ref_scorer.score_all(all_videos, all_comments, all_accounts)
-            top_list = ref_data.get("top_reference_videos", [])
-            emit(f"🎯 对标参考视频: {len(top_list)} 条通过门控 (共 {len(all_videos)} 条视频)")
-            if top_list:
+        cc_cfg_dict = cfg.get("comment_classifier", {})
+        cc_cfg = CommentClassifierConfig(**{
+            k: v for k, v in cc_cfg_dict.items()
+            if k in CommentClassifierConfig.__dataclass_fields__
+        })
+
+        if cc_cfg.enabled and deep_analyzed_videos and openai_key:
+            emit(f"🧠 阶段 3: LLM 评论意图分类 ({len(deep_analyzed_videos)} 条视频)...")
+
+            openai_proxy = scraper._current_proxy
+            classifier = CommentClassifier(
+                api_key=openai_key,
+                config=cc_cfg,
+                base_url=openai_base_url or None,
+                model=cc_cfg.model,
+                proxy=openai_proxy,
+            )
+
+            try:
+                batch_result = loop.run_until_complete(
+                    classifier.classify_videos(deep_analyzed_videos)
+                )
+
+                for vr in batch_result.video_results:
+                    classify_map[vr.video_id] = vr
+                    # 将分类结果写回视频
+                    for v in deep_analyzed_videos:
+                        if v.get("id") == vr.video_id:
+                            v["intent_ratio"] = vr.intent_ratio
+                            v["intent_quality_score"] = vr.intent_quality_score
+                            v["intent_diversity"] = vr.intent_diversity
+                            v["actionable_intent_count"] = vr.actionable_intent_count
+                            v["categories_hit"] = vr.categories_hit
+                            v["is_weak_reference"] = vr.is_weak_reference
+                            break
+
+                # ── 阶段 3.5: 轻量淘汰 — 意图信号过弱的视频不入 FinalScore ──
+                pre_filter_count = len(deep_analyzed_videos)
+                deep_analyzed_videos, intent_filtered_out = classifier.filter_low_intent(
+                    deep_analyzed_videos, classify_map
+                )
+                if intent_filtered_out:
+                    emit(
+                        f"🔍 阶段 3.5 轻量淘汰: {len(intent_filtered_out)}/{pre_filter_count} "
+                        f"条视频意图信号过弱, 不进入 FinalScore "
+                        f"(保留 {len(deep_analyzed_videos)} 条)"
+                    )
+                    # 淘汰视频的评论仍保留 (供导出)
+                    for v in intent_filtered_out:
+                        deep_c = v.get("_deep_comments", [])
+                        for c in deep_c:
+                            c["account_username"] = v.get("account_username", "")
+                        all_comments.extend(deep_c)
+
+                # 构建意图摘要数据 (供导出 + AI 分析)
+                intent_summary = {
+                    "total_videos_analyzed": len(batch_result.video_results),
+                    "videos_with_intent": sum(
+                        1 for vr in batch_result.video_results if vr.intent_comments > 0
+                    ),
+                    "avg_intent_ratio": (
+                        sum(vr.intent_ratio for vr in batch_result.video_results)
+                        / max(1, len(batch_result.video_results))
+                    ),
+                    "total_actionable": sum(
+                        vr.actionable_intent_count for vr in batch_result.video_results
+                    ),
+                    "intent_filtered_out": len(intent_filtered_out),
+                    "final_deep_videos": len(deep_analyzed_videos),
+                }
+
+                # 将深度分析评论加入 all_comments
+                for v in deep_analyzed_videos:
+                    deep_c = v.get("_deep_comments", [])
+                    # 为每条深度评论补充意图分类结果
+                    vr = classify_map.get(v.get("id", ""))
+                    if vr:
+                        classified_map = {
+                            cc.comment_index: cc for cc in vr.classified_comments
+                        }
+                        for ci, c in enumerate(deep_c):
+                            cc = classified_map.get(ci)
+                            if cc:
+                                c["has_intent"] = cc.has_intent
+                                c["top_intent"] = cc.category
+                                c["top_intent_confidence"] = cc.intensity
+                                c["actionable"] = cc.actionable
+                    for c in deep_c:
+                        c["account_username"] = v.get("account_username", "")
+                    all_comments.extend(deep_c)
+
+                intent_data = {
+                    "summary": intent_summary,
+                    "classify_map": classify_map,
+                }
+                _active_tasks[task_id]["intent_data"] = intent_data
+
+                emit(
+                    f"✅ 意图分类完成: {intent_summary['videos_with_intent']}/{intent_summary['total_videos_analyzed']} "
+                    f"视频有采购意图, {intent_summary['total_actionable']} 条可转化商机 "
+                    f"(LLM 调用 {batch_result.total_llm_calls} 次)"
+                )
+
+            except Exception as e:
+                logger.error("评论分类失败: %s", e)
+                emit(f"⚠️ 评论分类失败: {e}, 降级使用采样数据")
+                # 降级: 仍使用深度评论但不做 LLM 分类
+                for v in deep_analyzed_videos:
+                    deep_c = v.get("_deep_comments", [])
+                    for c in deep_c:
+                        c["account_username"] = v.get("account_username", "")
+                    all_comments.extend(deep_c)
+
+            finally:
+                loop.run_until_complete(classifier.close())
+
+        elif not openai_key:
+            emit("⚠️ 未设置 OpenAI Key, 跳过 LLM 意图分类")
+
+        # ── 阶段 4: FinalScore 终极统一评分 (三权重 30/30/40) ──
+        fs_cfg_dict = cfg.get("final_scorer", {})
+        fs_cfg = FinalScorerConfig(**{
+            k: v for k, v in fs_cfg_dict.items()
+            if k in FinalScorerConfig.__dataclass_fields__
+        })
+
+        if fs_cfg.enabled and deep_analyzed_videos:
+            emit("🎯 阶段 4: FinalScore 终极评分 (30/30/40)...")
+
+            final_scorer = FinalScorer(fs_cfg)
+            all_scored, top_references = final_scorer.score_all(
+                deep_analyzed_videos, classify_map
+            )
+
+            # 账号级聚合
+            all_accounts = final_scorer.aggregate_accounts(top_references, all_accounts)
+
+            tiers = {}
+            for v in all_scored:
+                t = v.get("tier", "D")
+                tiers[t] = tiers.get(t, 0) + 1
+            emit(
+                f"✅ FinalScore: {len(all_scored)} 条评分, {len(top_references)} 条对标参考, "
+                f"等级分布: {tiers}"
+            )
+
+            if top_references:
                 summaries = []
-                for i, v in enumerate(top_list[:5]):
+                for i, v in enumerate(top_references[:5]):
                     summaries.append(
                         f"#{i+1} @{v.get('account_username','')}: "
-                        f"参考分{v.get('reference_score',0)} "
-                        f"(采购意向{v.get('purchase_intent_ratio',0):.0%})"
+                        f"final={v.get('final_score',0):.0f} "
+                        f"(意图={v.get('commercial_intent',0):.0f})"
                     )
                 emit(f"  对标 Top 5: {' | '.join(summaries)}")
-            _active_tasks[task_id]["reference_data"] = ref_data
 
-        # 更新 scraped_data
+            # 为每个 Top 视频构建意图摘要 (供 AI 分析 + 导出)
+            for v in top_references:
+                vid = v.get("id", "")
+                vr = classify_map.get(vid)
+                if vr:
+                    # 取代表性评论 (最高强度的意图评论)
+                    intent_comments = sorted(
+                        [c for c in vr.classified_comments if c.has_intent],
+                        key=lambda c: c.intensity, reverse=True
+                    )
+                    v["intent_summary"] = {
+                        "intent_ratio": vr.intent_ratio,
+                        "top_categories": vr.categories_hit[:5],
+                        "sample_comments": [
+                            {"username": "", "text": c.text[:150]}
+                            for c in intent_comments[:5]
+                        ],
+                    }
+                    v["purchase_intent_ratio"] = vr.intent_ratio
+                    v["purchase_intent_comments"] = vr.intent_comments
+                else:
+                    v["intent_summary"] = {"intent_ratio": 0, "top_categories": [], "sample_comments": []}
+                    v["purchase_intent_ratio"] = 0
+                    v["purchase_intent_comments"] = 0
+
+            _active_tasks[task_id]["reference_data"] = {
+                "top_reference_videos": top_references,
+                "all_scored": all_scored,
+            }
+
+        else:
+            top_references = deep_analyzed_videos[:20]  # 无评分时用原始深度视频
+            emit(f"⚠️ FinalScore 未启用/无深度视频, Top {len(top_references)} 条直接作为参考")
+
+        # 更新 scraped_data (供导出)
+        tiers_summary = tiers if 'tiers' in locals() else {}
         scraped_data["accounts"] = all_accounts
         scraped_data["videos"] = all_videos
         scraped_data["comments"] = all_comments
         scraped_data["total_accounts"] = len(all_accounts)
         scraped_data["total_videos"] = len(all_videos)
         scraped_data["total_comments"] = len(all_comments)
+        scraped_data["reference_videos"] = top_references
+        scraped_data["reference_benchmarks"] = {
+            "top_n": len(top_references),
+            "tiers": tiers_summary,
+        }
 
-        # 注入爆款特征到 scraped_data（供导出使用）
-        if _active_tasks[task_id].get("viral_data"):
-            vd = _active_tasks[task_id]["viral_data"]
-            scraped_data["viral_characteristics"] = vd.get("viral_characteristics", {})
-            scraped_data["global_benchmarks"] = vd.get("global_benchmarks", {})
-
-        # 注入对标参考视频数据（供导出使用）
-        if _active_tasks[task_id].get("reference_data"):
-            rd = _active_tasks[task_id]["reference_data"]
-            scraped_data["reference_videos"] = rd.get("top_reference_videos", [])
-            scraped_data["reference_benchmarks"] = rd.get("reference_benchmarks", {})
-
-        # ═══════════════════════════════════════════════════════════
-        # P6: AI 分析（传入评分和意图数据增强分析质量）
-        # ═══════════════════════════════════════════════════════════
+        # ── 阶段 5: AI 分析总结 (精简, 仅 Top 20) ──
         analysis_data = None
-        if use_ai and openai_key:
-            emit("正在进行 AI 分析...")
+        if use_ai and openai_key and top_references:
+            emit(f"🤖 阶段 5: AI 分析总结 (仅 Top {min(20, len(top_references))} 对标视频)...")
             try:
-                # 获取代理传给 OpenAI
                 openai_proxy = scraper._current_proxy
 
                 analyzer = TikTokAnalyzer(
@@ -368,28 +518,20 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
                     proxy=openai_proxy,
                 )
 
-                # P6: 使用增强分析（如果启用了评分/意图识别则传入补充数据）
-                ai_cfg = cfg.get("ai_analysis", {})
-                use_scored = ai_cfg.get("use_scored_data", True)
-                use_intent = ai_cfg.get("use_intent_data", True)
-
-                if use_scored and (any(a.get("score") is not None for a in all_accounts)):
-                    analysis_data = loop.run_until_complete(
-                        analyzer.analyze_enhanced(
-                            scraped_data,
-                            intent_data=intent_data if use_intent else None,
-                            config=ai_cfg,
-                        )
-                    )
-                else:
-                    analysis_data = loop.run_until_complete(analyzer.analyze(scraped_data))
+                analysis_data = loop.run_until_complete(
+                    analyzer.analyze_top_references(top_references, all_accounts)
+                )
                 _active_tasks[task_id]["analysis_data"] = analysis_data
-                emit("AI 分析完成", {"analysis": analysis_data})
+                emit(
+                    f"✅ AI 分析完成 (市场机会评分: {analysis_data.get('market_opportunity_score', 'N/A')})",
+                    {"analysis": analysis_data}
+                )
             except Exception as e:
                 logger.error("AI 分析失败: %s", e)
                 emit(f"AI 分析失败: {e}", {"error": str(e)})
             finally:
                 loop.run_until_complete(analyzer.close())
+
         elif use_ai and not openai_key:
             emit("未设置 OpenAI API Key，跳过 AI 分析")
 
@@ -399,14 +541,17 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
         csv_files = export_csv(scraped_data, analysis_data, str(output_dir))
         md_file = export_markdown(scraped_data, analysis_data, keywords, region, str(output_dir))
 
+        cancelled = _active_tasks[task_id].get("cancelled", False)
         _active_tasks[task_id].update({
-            "status": "completed",
+            "status": "cancelled" if cancelled else "completed",
             "csv_files": csv_files,
             "md_file": md_file,
         })
 
-        emit("任务完成！", {
+        done_msg = "⏹ 任务已停止（部分结果）" if cancelled else "任务完成！"
+        emit(done_msg, {
             "done": True,
+            "cancelled_early": cancelled,
             "csv_files": {k: str(v) for k, v in csv_files.items()},
             "md_file": str(md_file),
             "summary": {
@@ -495,7 +640,7 @@ def download_file(task_id, file_type):
 @app.route("/api/results/<task_id>")
 def task_results(task_id):
     task = _active_tasks.get(task_id, {})
-    if task.get("status") != "completed":
+    if task.get("status") not in ("completed", "cancelled"):
         return jsonify({"error": "任务尚未完成"}), 400
 
     scraped = task.get("scraped_data", {})
@@ -503,14 +648,23 @@ def task_results(task_id):
     ref_data = task.get("reference_data", {})
     intent_data = task.get("intent_data", {})
 
-    # 构建意图摘要
+    # 构建意图摘要 (兼容新旧格式)
     intent_summary = {}
     if intent_data:
+        s = intent_data.get("summary", {})
         intent_summary = {
-            "total_comments": intent_data.get("summary", {}).get("total_comments", 0),
-            "comments_with_intent": intent_data.get("summary", {}).get("comments_with_intent", 0),
-            "intent_rate": intent_data.get("summary", {}).get("intent_rate", 0),
-            "by_category": intent_data.get("summary", {}).get("by_category", {}),
+            "videos_analyzed": s.get("total_videos_analyzed", 0),
+            "videos_with_intent": s.get("videos_with_intent", 0),
+            "avg_intent_ratio": s.get("avg_intent_ratio", 0),
+            "total_actionable": s.get("total_actionable", 0),
+            # 向后兼容
+            "total_comments": s.get("total_comments",
+                                     scraped.get("total_comments", 0)),
+            "comments_with_intent": s.get("comments_with_intent",
+                                          s.get("videos_with_intent", 0)),
+            "intent_rate": s.get("intent_rate",
+                                 s.get("avg_intent_ratio", 0)),
+            "by_category": s.get("by_category", {}),
         }
 
     return jsonify({
@@ -518,13 +672,19 @@ def task_results(task_id):
             "accounts": scraped.get("total_accounts", 0),
             "videos": scraped.get("total_videos", 0),
             "comments": scraped.get("total_comments", 0),
+            "deep_analyzed": scraped.get("intent_signaled_count",
+                                         len(scraped.get("deep_analyzed_videos", []))),
+            "quick_score_stats": scraped.get("quick_score_stats", {}),
         },
         "reference_videos": ref_data.get("top_reference_videos", []),
         "reference_benchmarks": ref_data.get("reference_benchmarks", {}),
         "intent_summary": intent_summary,
-        "viral_characteristics": scraped.get("viral_characteristics", {}),
         "accounts": scraped.get("accounts", [])[:10],
-        "videos": sorted(scraped.get("videos", []), key=lambda x: x.get("digg_count", 0) or 0, reverse=True)[:20],
+        "videos": sorted(
+            scraped.get("deep_analyzed_videos", scraped.get("videos", [])),
+            key=lambda x: x.get("final_score", x.get("quick_score", 0)) or 0,
+            reverse=True
+        )[:20],
         "analysis": analysis,
     })
 

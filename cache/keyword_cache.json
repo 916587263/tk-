@@ -1,0 +1,132 @@
+{
+  "entries": {
+    "686fae6e32ab5b58": {
+      "result": {
+        "keywords": [
+          "cotton tote bag",
+          "cotton tote bag factory",
+          "cotton tote bag supplier",
+          "cotton tote bag product",
+          "cotton tote bag manufacturer",
+          "cotton tote bag wholesale",
+          "cotton tote bag price",
+          "cotton tote bag buy",
+          "cotton tote bag online",
+          "buy cotton tote bag",
+          "cotton tote bag for sale",
+          "cotton tote bag export",
+          "cotton tote bag company",
+          "cotton tote bag machine",
+          "cotton tote bag material",
+          "cotton tote bag custom"
+        ],
+        "original": [
+          "cotton tote bag"
+        ],
+        "tier": "balanced",
+        "count": 16,
+        "added": 15,
+        "breakdown": {
+          "*": 1,
+          "* factory": 1,
+          "* supplier": 1,
+          "* product": 1,
+          "* manufacturer": 1,
+          "* wholesale": 1,
+          "* price": 1,
+          "* buy": 1,
+          "* online": 1,
+          "buy *": 1
+        }
+      },
+      "cached_at": "2026-06-22T16:44:47.767020"
+    },
+    "860c59559fea46c5": {
+      "result": {
+        "keywords": [
+          "Laminated PP non woven bag",
+          "Laminated PP non woven bag factory",
+          "Laminated PP non woven bag supplier",
+          "Laminated PP non woven bag product",
+          "Laminated PP non woven bag manufacturer"
+        ],
+        "original": [
+          "Laminated PP non woven bag"
+        ],
+        "tier": "compact",
+        "count": 5,
+        "added": 4,
+        "breakdown": {
+          "*": 1,
+          "* factory": 1,
+          "* supplier": 1,
+          "* product": 1,
+          "* manufacturer": 1
+        }
+      },
+      "cached_at": "2026-06-22T16:47:40.397978"
+    },
+    "b5f27c218cdf82c2": {
+      "result": {
+        "keywords": [
+          "Reusable PP Woven Shopping Bag",
+          "Reusable PP Woven Shopping Bag factory",
+          "Reusable PP Woven Shopping Bag supplier",
+          "Reusable PP Woven Shopping Bag product",
+          "Reusable PP Woven Shopping Bag manufacturer"
+        ],
+        "original": [
+          "Reusable PP Woven Shopping Bag"
+        ],
+        "tier": "compact",
+        "count": 5,
+        "added": 4,
+        "breakdown": {
+          "*": 1,
+          "* factory": 1,
+          "* supplier": 1,
+          "* product": 1,
+          "* manufacturer": 1
+        }
+      },
+      "cached_at": "2026-06-22T17:11:38.499136"
+    },
+    "f76eddaca6a29043": {
+      "result": {
+        "keywords": [
+          "shopping bag",
+          "shopping bag factory",
+          "shopping bag supplier",
+          "shopping bag product",
+          "shopping bag manufacturer",
+          "door handle",
+          "door handle factory",
+          "door handle supplier",
+          "door handle product",
+          "door handle manufacturer",
+          "laminated woven bag",
+          "laminated woven bag factory",
+          "laminated woven bag supplier",
+          "laminated woven bag product",
+          "laminated woven bag manufacturer"
+        ],
+        "original": [
+          "shopping bag",
+          "door handle",
+          "laminated woven bag"
+        ],
+        "tier": "balanced",
+        "count": 15,
+        "added": 12,
+        "breakdown": {
+          "*": 3,
+          "* factory": 3,
+          "* supplier": 3,
+          "* product": 3,
+          "* manufacturer": 3
+        }
+      },
+      "cached_at": "2026-06-23T10:29:25.038491"
+    }
+  }
+}

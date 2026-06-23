@@ -28,11 +28,15 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
     acc_file = out_dir / "accounts.csv"
     with open(acc_file, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        has_scores = any(a.get("score") is not None for a in scraped_data.get("accounts", []))
+        # 检查是否有新管道评分数据 (reference_value) 或旧管道 (score)
+        has_scores = any(
+            a.get("reference_value") is not None or a.get("score") is not None
+            for a in scraped_data.get("accounts", [])
+        )
         header = ["用户名", "昵称", "粉丝数", "点赞数", "关注数", "视频数", "认证", "简介", "地区", "链接"]
         has_viral = any(a.get("viral_profile") is not None for a in scraped_data.get("accounts", []))
         if has_scores:
-            header.extend(["综合评分", "等级", "互动率"])
+            header.extend(["商业价值分", "参考视频数", "高等级视频数"])
         if has_viral:
             header.extend(["平均点赞", "平均评论", "平均分享", "平均互动率", "爆款占比", "互动率基准"])
         writer.writerow(header)
@@ -50,11 +54,10 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
                 a.get("url", ""),
             ]
             if has_scores:
-                bd = a.get("score_breakdown", {})
                 row.extend([
-                    a.get("score", ""),
-                    a.get("tier", ""),
-                    bd.get("engagement_rate", ""),
+                    a.get("reference_value", a.get("score", "")),
+                    a.get("reference_video_count", a.get("tier", "")),
+                    a.get("high_tier_video_count", ""),
                 ])
             if has_viral:
                 vp = a.get("viral_profile") or {}
@@ -73,18 +76,25 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
     vid_file = out_dir / "videos.csv"
     with open(vid_file, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        has_scores = any(v.get("score") is not None for v in scraped_data.get("videos", []))
+        all_vids = scraped_data.get("videos", [])
+        # 检测新管道字段
+        has_quick_score = any(v.get("quick_score") is not None for v in all_vids)
+        has_final_score = any(v.get("final_score") is not None for v in all_vids)
+        has_old_scores = any(v.get("score") is not None for v in all_vids)
+        has_reference = any(v.get("is_top_reference") for v in all_vids)
+
         header = ["账号", "视频ID", "标题/文案", "标签", "播放量", "点赞数", "评论数", "分享数", "时长(秒)", "音乐", "链接"]
-        has_viral = any(v.get("engagement_rank") is not None for v in scraped_data.get("videos", []))
-        has_reference = any(v.get("reference_score") is not None for v in scraped_data.get("videos", []))
-        if has_scores:
+        if has_quick_score:
+            header.extend(["QuickScore", "产品相关度", "视频质量"])
+        if has_final_score:
+            header.extend(["FinalScore", "商业意图", "等级", "是否对标参考", "参考排名"])
+        if has_old_scores and not (has_quick_score or has_final_score):
             header.extend(["综合评分", "等级", "病毒系数"])
-        if has_viral:
-            header.extend(["账号内排名", "是否爆款", "互动率百分位"])
         if has_reference:
             header.extend(["采购意向评论数", "采购意向占比", "对标参考评分", "对标等级"])
         writer.writerow(header)
-        for v in scraped_data.get("videos", []):
+
+        for v in all_vids:
             row = [
                 v.get("account_username", ""),
                 v.get("id", ""),
@@ -98,24 +108,32 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
                 v.get("music", ""),
                 v.get("url", ""),
             ]
-            if has_scores:
+            if has_quick_score:
+                row.extend([
+                    v.get("quick_score", ""),
+                    v.get("product_relevance", ""),
+                    v.get("video_quality_score", ""),
+                ])
+            if has_final_score:
+                row.extend([
+                    v.get("final_score", ""),
+                    v.get("commercial_intent", ""),
+                    v.get("tier", ""),
+                    "是" if v.get("is_top_reference") else "否",
+                    v.get("reference_rank", ""),
+                ])
+            if has_old_scores and not (has_quick_score or has_final_score):
                 row.extend([
                     v.get("score", ""),
                     v.get("tier", ""),
                     v.get("virality", ""),
                 ])
-            if has_viral:
-                row.extend([
-                    v.get("engagement_rank", ""),
-                    "是" if v.get("is_viral") else "否",
-                    v.get("engagement_percentile", ""),
-                ])
             if has_reference:
                 row.extend([
                     v.get("purchase_intent_comments", 0),
                     f"{v.get('purchase_intent_ratio', 0):.2%}" if v.get("purchase_intent_ratio") is not None else "",
-                    v.get("reference_score", ""),
-                    v.get("reference_tier", ""),
+                    v.get("reference_score", v.get("final_score", "")),
+                    v.get("reference_tier", v.get("tier", "")),
                 ])
             writer.writerow(row)
     files["videos"] = str(vid_file)
@@ -174,37 +192,45 @@ def export_csv(scraped_data: dict, analysis_data: Optional[dict] = None,
                     ])
         files["analysis"] = str(ana_file)
 
-    # 5. 对标参考视频 CSV（按 reference_score 排序，通过门控的 Top N）
+    # 5. 对标参考视频 CSV (新管道: is_top_reference + final_score)
     all_videos = scraped_data.get("videos", [])
-    reference_videos = [v for v in all_videos if v.get("is_top_reference")]
+    reference_videos = scraped_data.get("reference_videos", [])
+    if not reference_videos:
+        reference_videos = [v for v in all_videos if v.get("is_top_reference")]
     if reference_videos:
         ref_file = out_dir / "reference_videos.csv"
         with open(ref_file, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             writer.writerow([
                 "排名", "账号", "视频ID", "描述", "播放量", "点赞数", "评论数",
-                "分享数", "互动率", "综合评分", "等级", "病毒系数",
-                "采购意向评论数", "采购意向占比", "对标参考评分", "对标等级",
+                "分享数", "产品相关度", "视频质量", "商业意图",
+                "FinalScore", "等级", "采购意向评论数", "采购意向占比",
                 "标签", "链接"
             ])
             for v in reference_videos:
+                # 计算互动率
+                likes = v.get("digg_count", 0) or 0
+                comments = v.get("comment_count", 0) or 0
+                shares = v.get("share_count", 0) or 0
+                plays = v.get("play_count", 1) or 1
+                er = (likes + comments + shares) / plays if plays > 0 else 0
+
                 writer.writerow([
                     v.get("reference_rank", ""),
                     v.get("account_username", ""),
                     v.get("id", ""),
                     (v.get("desc") or "")[:100],
                     v.get("play_count", 0),
-                    v.get("digg_count", 0),
-                    v.get("comment_count", 0),
-                    v.get("share_count", 0),
-                    f"{v.get('_engagement_rate', 0):.2%}" if v.get("_engagement_rate") is not None else "",
-                    v.get("score", ""),
-                    v.get("tier", ""),
-                    v.get("virality", ""),
+                    likes,
+                    comments,
+                    shares,
+                    v.get("product_relevance", ""),
+                    v.get("video_quality_score", ""),
+                    v.get("commercial_intent", ""),
+                    v.get("final_score", v.get("reference_score", "")),
+                    v.get("tier", v.get("reference_tier", "")),
                     v.get("purchase_intent_comments", 0),
                     f"{v.get('purchase_intent_ratio', 0):.2%}" if v.get("purchase_intent_ratio") is not None else "",
-                    v.get("reference_score", ""),
-                    v.get("reference_tier", ""),
                     ",".join(v.get("tags", [])),
                     v.get("url", ""),
                 ])
@@ -248,25 +274,29 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
     # 账号排名
     lines.append(f"## 🏆 账号排行榜（按粉丝数）")
     lines.append(f"")
-    has_scores = any(a.get("score") is not None for a in scraped_data.get("accounts", []))
+    has_scores = any(
+        a.get("reference_value") is not None or a.get("score") is not None
+        for a in scraped_data.get("accounts", [])
+    )
     if has_scores:
-        lines.append(f"| 排名 | 账号 | 昵称 | 粉丝 | 点赞 | 评分 | 等级 | 简介 |")
-        lines.append(f"|------|------|------|------|------|------|------|------|")
+        lines.append(f"| 排名 | 账号 | 昵称 | 粉丝 | 点赞 | 商业价值分 | 参考视频数 | 简介 |")
+        lines.append(f"|------|------|------|------|------|------------|------------|------|")
     else:
         lines.append(f"| 排名 | 账号 | 昵称 | 粉丝 | 点赞 | 简介 |")
         lines.append(f"|------|------|------|------|------|------|")
     accounts_sorted = sorted(
         scraped_data.get("accounts", []),
-        key=lambda x: x.get("follower_count", 0) or 0,
+        key=lambda x: x.get("reference_value", x.get("follower_count", 0)) or 0,
         reverse=True
     )
     for i, a in enumerate(accounts_sorted[:20], 1):
         if has_scores:
+            rv = a.get("reference_value", a.get("score", "-"))
             lines.append(
                 f"| {i} | @{a.get('username', '')} | {a.get('nickname', '')} | "
                 f"{_fmt_count(a.get('follower_count', 0))} | {_fmt_count(a.get('like_count', 0))} | "
-                f"{a.get('score', '-')}{'⭐' if a.get('tier') in ('S','A') else ''} | "
-                f"{a.get('tier_label', a.get('tier', ''))} | "
+                f"{rv}{'⭐' if rv > 60 else ''} | "
+                f"{a.get('reference_video_count', a.get('tier', ''))} | "
                 f"{a.get('bio', '')[:50]} |"
             )
         else:
@@ -298,26 +328,29 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
 
     # ── 对标参考视频 TOP N ──
     all_videos = scraped_data.get("videos", [])
-    reference_videos = sorted(
-        [v for v in all_videos if v.get("is_top_reference")],
-        key=lambda x: x.get("reference_score", 0), reverse=True
-    )
+    reference_videos = scraped_data.get("reference_videos", [])
+    if not reference_videos:
+        reference_videos = sorted(
+            [v for v in all_videos if v.get("is_top_reference")],
+            key=lambda x: x.get("final_score", x.get("reference_score", 0)), reverse=True
+        )
     if reference_videos:
         lines.append(f"## 🎯 对标参考视频 TOP {len(reference_videos)}")
         lines.append(f"")
-        lines.append(f"> 通过门控 (点赞≥10, 评论≥5, 存在采购意向) 的高参考价值视频，适合运营团队对标模仿。")
+        lines.append(f"> 通过 QuickScore + 商业意图验证的高参考价值视频，适合运营团队对标模仿。")
         lines.append(f"")
-        lines.append(f"| 排名 | 账号 | 描述 | 播放 | 点赞 | 评论 | 分享 | 互动率 | 参考评分 | 采购意向占比 | 等级 |")
-        lines.append(f"|------|------|------|------|------|------|------|--------|----------|------------|------|")
+        lines.append(f"| 排名 | 账号 | 描述 | 播放 | 点赞 | 评论 | FinalScore | 商业意图 | 采购意向占比 | 等级 |")
+        lines.append(f"|------|------|------|------|------|------|-----------|----------|------------|------|")
         for v in reference_videos:
             desc = (v.get("desc") or "")[:50].replace("|", "/")
-            er = v.get("_engagement_rate", 0)
             lines.append(
                 f"| {v.get('reference_rank', '')} | @{v.get('account_username', '')} | {desc} | "
                 f"{_fmt_count(v.get('play_count', 0))} | {_fmt_count(v.get('digg_count', 0))} | "
-                f"{_fmt_count(v.get('comment_count', 0))} | {_fmt_count(v.get('share_count', 0))} | "
-                f"{er:.1%} | {v.get('reference_score', '')} | {v.get('purchase_intent_ratio', 0):.1%} | "
-                f"{v.get('reference_tier', '')} |"
+                f"{_fmt_count(v.get('comment_count', 0))} | "
+                f"{v.get('final_score', v.get('reference_score', ''))} | "
+                f"{v.get('commercial_intent', '')} | "
+                f"{v.get('purchase_intent_ratio', 0):.1%} | "
+                f"{v.get('tier', v.get('reference_tier', ''))} |"
             )
         lines.append(f"")
 
@@ -442,7 +475,7 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
     lines.append(f"")
 
     # ── 采购意向分析 ──
-    reference_vids = [v for v in all_videos if v.get("reference_score")]
+    reference_vids = [v for v in all_videos if v.get("is_top_reference") or v.get("reference_score")]
     if reference_vids:
         lines.append(f"## 🧠 采购意向分析")
         lines.append(f"")
@@ -452,18 +485,17 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
         lines.append(f"- **含采购意向评论数**: {intent_total} 条")
         lines.append(f"- **采购意向占比**: {intent_total / max(comment_total, 1):.1%}")
         lines.append(f"")
-        # 按采购意向占比排序的 Top 5
         by_intent = sorted(reference_vids, key=lambda x: x.get("purchase_intent_ratio", 0), reverse=True)[:5]
         lines.append(f"### 采购意向最高的视频")
         lines.append(f"")
-        lines.append(f"| # | 账号 | 描述 | 采购意向评论 | 采购意向占比 | 参考评分 |")
-        lines.append(f"|---|------|------|------------|------------|----------|")
+        lines.append(f"| # | 账号 | 描述 | 采购意向评论 | 采购意向占比 | 评分 |")
+        lines.append(f"|---|------|------|------------|------------|------|")
         for i, v in enumerate(by_intent, 1):
             desc = (v.get("desc") or "")[:40].replace("|", "/")
             lines.append(
                 f"| {i} | @{v.get('account_username', '')} | {desc} | "
                 f"{v.get('purchase_intent_comments', 0)} | {v.get('purchase_intent_ratio', 0):.1%} | "
-                f"{v.get('reference_score', '')} |"
+                f"{v.get('final_score', v.get('reference_score', ''))} |"
             )
         lines.append(f"")
 

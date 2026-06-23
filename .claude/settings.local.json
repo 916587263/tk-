@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "Review all files modified during this session under C:\\Users\\Administrator\\Documents\\=tk\\. Check whether PROJECT_INDEX.md needs updating. Update it if any of these happened:\n- A new module file was created in tiktok_analyzer/\n- An existing module's responsibility, inputs, or outputs changed significantly\n- The data flow or pipeline order changed\n- A new config section was added to config.yaml\n- A new遗留问题 was resolved or a new one was added\n- A new database/cache file was introduced\n\nAlso update relevant memory files in C:\\Users\\Administrator\\.claude\\projects\\C--Users-Administrator\\memory\\ if project facts changed.\n\nBe precise and minimal — don't change what's already correct. If nothing substantive changed, don't touch the files.",
+            "timeout": 120,
+            "statusMessage": "Updating PROJECT_INDEX.md..."
+          },
+          {
+            "type": "command",
+            "command": "echo \"--- $(date '+%Y-%m-%d %H:%M:%S') ---\" >> \"$HOME/Documents/=tk/.claude/session.log\" && py -m pip cache purge 2>/dev/null; exit 0",
+            "timeout": 30,
+            "statusMessage": "Cleaning up temp files..."
+          }
+        ]
+      }
+    ]
+  }
+}

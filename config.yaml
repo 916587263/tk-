@@ -4,8 +4,99 @@
 # 修改后下次启动分析自动生效，无需重启 Web 服务
 # ============================================================
 
-# ── P0: 视频预筛选 ──
-# 在评论抓取前过滤低质量视频，减少无效 API 调用
+# ── 阶段 3: 评论 LLM 分类 ──
+# 批量 LLM 调用, 对阶段 2 筛选出的视频进行深度评论意图分类
+comment_classifier:
+  enabled: true
+  videos_per_batch: 6              # 每批处理的视频数
+  max_comments_per_video: 40       # 每个视频最多传入 LLM 的评论数
+  model: gpt-4o-mini               # 分类任务用小模型降低成本
+  temperature: 0.1                 # 低温度确保一致性
+  # ── 阶段 3.5: 后分类轻量淘汰 ──
+  # 在 CommentClassifier 之后淘汰意图信号过弱的视频,
+  # 避免所有视频涌入 FinalScore 造成无效计算
+  intent_filter_enabled: true
+  intent_filter_min_ratio: 0.03    # intent_ratio < 3% AND
+  intent_filter_min_actionable: 1  # actionable < 1 → 淘汰
+
+# ── 阶段 4: FinalScore 终极统一评分 ──
+# 仅对阶段 3 通过的最终候选视频评分 (≤10-20 条)
+# 三权重: 产品相关度(30%) + 视频质量(30%) + 商业意图(40%)
+# 商业意图维度在此处首次引入 (晚调 LLM)
+final_scorer:
+  enabled: true
+  weight_product: 0.30
+  weight_quality: 0.30
+  weight_intent: 0.40
+  intent_sub_ratio: 0.4            # intent_ratio 子权重
+  intent_sub_quality: 0.4          # intent_quality 子权重
+  intent_sub_diversity: 0.2        # intent_diversity 子权重
+  tier_thresholds:
+    S: 80
+    A: 60
+    B: 40
+    C: 20
+  top_reference_n: 20
+
+# ── 阶段 1: QuickScore 无评论快速评分 ──
+# 仅基于视频元数据 + 账号信息, 零评论依赖
+# 目标: 尽早淘汰 ~70-80% 低价值视频
+quick_scorer:
+  enabled: true
+  weight_relevance: 0.50            # 产品相关度权重
+  weight_quality: 0.50              # 视频质量权重
+  min_score: 20.0                   # 低于此分直接淘汰
+  min_likes_no_comment: 5           # 无评论时最低点赞数
+  play_benchmark: 100000            # 播放量基准 (50分参考线)
+  engagement_benchmark: 0.05        # 互动率基准 (5%=50分)
+  personal_account_penalty: 30.0    # 个人/娱乐号降分幅度
+  # ── 商业白名单: 命中 ≥min_hits 个不同关键词 → 跳过硬淘汰 ──
+  commercial_whitelist:
+    - manufacturer
+    - factory
+    - supplier
+    - oem
+    - odm
+    - moq
+    - wholesale
+    - distributor
+    - importer
+    - exporter
+  commercial_whitelist_min_hits: 2
+  industry_keywords:
+    - factory
+    - manufacturer
+    - supplier
+    - wholesale
+    - export
+    - factory direct
+    - oem
+    - manufacturing
+    - production
+    - 工厂
+    - 厂家
+    - 供应商
+    - 批发
+    - 外贸
+    - 生产
+    - 制造
+    - 出口
+  personal_account_patterns:
+    - fan account
+    - fanpage
+    - fan page
+    - fandom
+    - stan
+    - updates
+    - daily
+    - vlog
+    - entertainment
+    - 粉丝
+    - 后援
+    - 日常
+    - 娱乐
+
+# ── P0: 视频预筛选 (DEPRECATED — 由 QuickScorer 替代) ──
 video_prefilter:
   enabled: true                  # 是否启用视频预筛选
   min_digg: 10                   # 最低点赞数（< 此值直接丢弃）
@@ -151,6 +242,16 @@ reference_video_scorer:
     - 生产
     - 制造
     - 出口
+
+# ── 关键词扩展 ──
+# 三级扩展策略: compact(快速验证) / balanced(日常生产) / full(深度挖掘)
+keyword_expansion:
+  default_tier: balanced            # CLI默认 compact, Web默认 balanced
+  cache_ttl_days: 7                 # 缓存有效期（天）
+  max_keywords_per_tier:
+    compact: 5
+    balanced: 16
+    full: 45
 
 # ── P6: AI 分析增强 ──
 ai_analysis:

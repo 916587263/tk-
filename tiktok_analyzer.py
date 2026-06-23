@@ -30,6 +30,7 @@ from tiktok_analyzer.video_scorer import VideoScorer, VideoFilter, VideoScorerCo
 from tiktok_analyzer.viral_detector import ViralDetector, ViralDetectorConfig
 from tiktok_analyzer.intent_detector import IntentDetector, IntentDetectorConfig
 from tiktok_analyzer.reference_video_scorer import ReferenceVideoScorer, ReferenceVideoScorerConfig
+from tiktok_analyzer.keyword_expander import KeywordExpander, KeywordCache
 
 logger = setup_logger("cli")
 
@@ -57,6 +58,8 @@ def parse_args():
     p.add_argument("--openai-base", default="", help="OpenAI Base URL")
     p.add_argument("--openai-model", default="gpt-4o", help="OpenAI Model")
     p.add_argument("--output", "-o", default="", help="输出目录（默认 data/task_id）")
+    p.add_argument("--expand", default="compact", choices=["compact", "balanced", "full"],
+                   help="关键词扩展级别 (compact/balanced/full, 默认compact)")
     return p.parse_args()
 
 
@@ -70,9 +73,33 @@ async def main():
     print(f"   关键词: {keywords}")
     print(f"   地区: {args.region or '不限'}")
     print(f"   配置: {args.accounts}账号/关键词, {args.videos}视频/账号, {args.comments}评论/视频")
+    print(f"   扩展: {args.expand}")
     print(f"   模式: {'CDP:{}'.format(args.cdp_port) if args.cdp_port else '普通'}")
     print(f"   AI: {'启用' if args.ai else '关闭'}")
     print()
+
+    # ── 关键词扩展 ──
+    exp_cfg = cfg.get("keyword_expansion", {})
+    if args.expand and len(keywords) <= 5:
+        cache_ttl = exp_cfg.get("cache_ttl_days", 7)
+        limits = exp_cfg.get("max_keywords_per_tier", None)
+        cache = KeywordCache(ttl_days=cache_ttl)
+        expander = KeywordExpander(cache=cache, tier_limits=limits)
+        exp_result = expander.expand(keywords, tier=args.expand)
+        if exp_result.get("added", 0) > 0:
+            print(f"  🔑 关键词已扩展 ({args.expand}): {len(keywords)} → {exp_result['count']} 词 "
+                  f"(+{exp_result['added']})" + (" [缓存命中]" if exp_result.get("from_cache") else ""))
+            keywords = exp_result["keywords"]
+            # ── 硬上限: 最多 10 个关键词 ──
+            if len(keywords) > 10:
+                print(f"  ⚠️ 扩展后关键词过多 ({len(keywords)} 个)，截断为前 10 个")
+                keywords = keywords[:10]
+    elif args.expand and len(keywords) > 5:
+        print(f"  ⚠️ 输入关键词过多 ({len(keywords)} 个)，跳过扩展")
+    # ── 硬上限: 未扩展的关键词也限制最多 10 个 ──
+    if len(keywords) > 10:
+        print(f"  ⚠️ 关键词过多 ({len(keywords)} 个)，截断为前 10 个")
+        keywords = keywords[:10]
 
     # Init
     checkpoint = CheckpointManager(task_id)
@@ -99,12 +126,18 @@ async def main():
     )
 
     try:
-        # ── 启动浏览器 ──
+        # ── 启动浏览器（CDP 失败自动降级）──
+        USER_DATA_DIR = BASE_DIR / "browser_profile"
         if args.cdp_port and args.cdp_port > 0:
             emit(f"连接CDP浏览器 (端口 {args.cdp_port})...")
-            await scraper.connect_over_cdp(args.cdp_port)
+            try:
+                await scraper.connect_over_cdp(args.cdp_port)
+            except Exception as cdp_err:
+                logger.warning("CDP 连接失败 (%s)，降级为独立启动", cdp_err)
+                emit(f"⚠️ CDP 连接失败 ({cdp_err})，降级为独立启动模式...")
+                await scraper.start_browser(user_data_dir=str(USER_DATA_DIR))
         else:
-            await scraper.start_browser()
+            await scraper.start_browser(user_data_dir=str(USER_DATA_DIR))
 
         logged_in = await scraper.ensure_logged_in()
         if not logged_in:

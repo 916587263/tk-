@@ -312,6 +312,135 @@ class TikTokAnalyzer:
                 "market_opportunity_score": None,
             }
 
+    async def analyze_top_references(
+        self, top_videos: list[dict], accounts: list[dict] = None
+    ) -> dict:
+        """阶段 5: 精简 AI 分析 — 仅处理 Top 20 对标参考视频
+
+        相比 analyze_enhanced (6000+ tokens), 此方法仅传入 Top 视频的摘要数据,
+        预计 input tokens ~1500-2500, 降低 60-70%。
+
+        Args:
+            top_videos: Top N 对标参考视频, 每条件含:
+                desc, account_username, final_score, tier, tier_label,
+                commercial_intent, product_relevance, video_quality_score,
+                digg_count, comment_count, play_count,
+                intent_summary (dict: {intent_ratio, top_categories, sample_comments})
+            accounts: 账号列表 (用于补充行业信息)
+
+        Returns:
+            analysis dict
+        """
+        logger.info("开始精简 AI 分析 (Top %d 对标视频)...", len(top_videos))
+
+        accounts = accounts or []
+        acc_map = {a.get("username", ""): a for a in accounts}
+
+        # 构建精简视频摘要
+        lines = []
+        for i, v in enumerate(top_videos[:20]):
+            uname = v.get("account_username", "")
+            acc = acc_map.get(uname, {})
+            score = v.get("final_score", 0)
+            tier = v.get("tier", "?")
+            tier_label = v.get("tier_label", "")
+            intent = v.get("commercial_intent", 0)
+
+            line = (
+                f"#{i+1} @{uname} | 评分:{score}({tier}级-{tier_label}) | "
+                f"商业意图:{intent} | "
+                f"播放:{v.get('play_count',0):,} | 点赞:{v.get('digg_count',0):,} | "
+                f"评论:{v.get('comment_count',0):,}"
+            )
+            desc = (v.get("desc") or "")[:100]
+            if desc:
+                line += f"\n    描述: {desc}"
+            bio = (acc.get("bio") or "")[:80]
+            if bio:
+                line += f"\n    账号简介: {bio}"
+
+            # 意图摘要
+            isum = v.get("intent_summary") or {}
+            if isum:
+                ratio = isum.get("intent_ratio", 0)
+                cats = isum.get("top_categories", [])
+                line += f"\n    采购意向: {ratio:.0%} | 类型: {', '.join(cats[:3])}"
+
+            # 代表性评论 (最多 3 条)
+            samples = isum.get("sample_comments", []) if isum else []
+            if samples:
+                line += "\n    代表评论:"
+                for sc in samples[:3]:
+                    line += f"\n      - [{sc.get('username','')}] {sc.get('text','')[:120]}"
+
+            lines.append(line)
+
+        videos_str = "\n\n".join(lines)
+
+        # 账号行业概览
+        account_summary = ""
+        biz_accounts = [a for a in accounts if any(
+            kw in (a.get("bio", "") + a.get("nickname", "")).lower()
+            for kw in ["factory", "manufacturer", "supplier", "wholesale", "export",
+                        "工厂", "厂家", "供应商"]
+        )]
+        if biz_accounts:
+            account_summary = f"行业账号 {len(biz_accounts)} 个 (含工厂/供应商/批发商标识)"
+
+        prompt = f"""你是一位 TikTok 外贸市场分析专家。以下是 TikTok 上最具商业参考价值的对标视频。
+
+## 对标参考视频 (Top {len(top_videos[:20])})
+{videos_str[:3000]}
+
+## 账号概览
+{account_summary}
+
+请从以下维度分析，输出 JSON:
+1. **business_needs**: 买家在寻找什么产品/服务? 消费动机是什么?
+2. **purchase_needs**: 具体的采购意向? (价格/起订量/供应商/定制等)
+3. **market_gaps**: 未被满足的需求? 缺少的产品/内容?
+4. **competitor_insights**: 头部账号的成功策略? 可模仿的模式?
+5. **actionable_strategy**: 内容策略 + 产品策略 + 定价策略建议
+
+每个发现: {{"finding": "...", "evidence": "...", "priority": 1-10, "confidence": 0.0-1.0, "suggestion": "..."}}
+
+输出格式:
+{{{{"analysis": {{"business_needs": [...], "purchase_needs": [...], "market_gaps": [...], "competitor_insights": [...], "actionable_strategy": [...]}}, "summary": "...", "market_opportunity_score": 0-100}}}}
+"""
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一位 TikTok 外贸市场分析专家。始终以 JSON 格式输出。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=3000,  # 精简输出
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            result = json.loads(content)
+            logger.info("精简 AI 分析完成 (tokens: ~%d)", response.usage.total_tokens if response.usage else 0)
+
+            analysis = result.get("analysis", result)
+            analysis["summary"] = result.get("summary", "")
+            analysis["market_opportunity_score"] = result.get("market_opportunity_score", None)
+            return analysis
+
+        except Exception as e:
+            logger.error("精简 AI 分析失败: %s", e)
+            return {
+                "error": str(e),
+                "business_needs": [],
+                "purchase_needs": [],
+                "market_gaps": [],
+                "competitor_insights": [],
+                "actionable_strategy": [],
+                "summary": f"分析出错: {e}",
+            }
+
     async def analyze_batch(self, scraped_data: dict, chunk_size: int = 50) -> dict:
         """分批分析大规模数据"""
         comments = scraped_data.get("comments", [])

@@ -461,3 +461,106 @@ class IntentDetector:
             insights.append(f"🚢 {counts['shipping_request']} 条物流询问 — 在视频/简介说明主要出口国家/运输方式")
 
         return insights
+
+
+# ═══════════════════════════════════════════════════════════
+# P1: 快速意图扫描器 — 采集阶段使用，纯关键词匹配，零延迟
+# ═══════════════════════════════════════════════════════════
+
+class QuickIntentScanner:
+    """轻量级采购意图扫描器 — 不依赖 LLM，仅用关键词+正则匹配
+
+    用于采集阶段快速判断评论中是否存在采购意图，决定是否完整抓取评论。
+    与 IntentDetector 的区别：
+      - IntentDetector: 采集后批量分析，支持更多规则和权重
+      - QuickIntentScanner: 采集时实时判断，只输出 bool / 意图分布
+
+    Args:
+        min_hits: 至少命中多少个独特意图类别才算"有意图"（默认 1）
+    """
+
+    # 9 类采购意图关键词（精简版，提取核心高频词）
+    INTENT_PATTERNS: dict[str, list[str]] = {
+        "price_inquiry": [
+            r"\b(how much|price|pricing|cost|quote|报价|价格|多少钱|什么价)\b",
+        ],
+        "moq_inquiry": [
+            r"\b(moq|minimum order|min order|起订|最小订单|最小起订量)\b",
+        ],
+        "supplier_search": [
+            r"\b(supplier|vendor|wholesaler|供应商|供货商|货源)\b",
+        ],
+        "factory_search": [
+            r"\b(factory|manufacturer|oem|odm|工厂|厂家|代工|贴牌|生产)\b",
+        ],
+        "sample_request": [
+            r"\b(sample|样品|样本|打样|寄样)\b",
+        ],
+        "contact_request": [
+            r"\b(contact|whatsapp|wechat|email|dm me|联系|加我|私信|号码)|\+\d{7,}",
+        ],
+        "catalog_request": [
+            r"\b(catalog|catalogue|brochure|lookbook|目录|图册|产品册|产品图)\b",
+        ],
+        "wholesale_request": [
+            r"\b(wholesale|bulk|large order|批发|大量|批量|囤货)\b",
+        ],
+        "distributor_search": [
+            r"\b(distributor|agent|dealer|reseller|代理|经销|分销|加盟)\b",
+        ],
+    }
+
+    def __init__(self, min_hits: int = 1):
+        self.min_hits = min_hits
+        self._compiled: dict[str, list[re.Pattern]] = {}
+        for name, patterns in self.INTENT_PATTERNS.items():
+            self._compiled[name] = [re.compile(p, re.IGNORECASE) for p in patterns]
+
+    def has_intent(self, comments: list[dict]) -> bool:
+        """快速判断：这批评论中是否存在采购意图
+
+        Args:
+            comments: 评论列表，每项需含 'text' 字段
+
+        Returns:
+            True 如果至少 min_hits 个不同意图类别被命中
+        """
+        if not comments:
+            return False
+        matched_categories: set[str] = set()
+        for c in comments:
+            text = c.get("text", "")
+            if not text:
+                continue
+            for name, patterns in self._compiled.items():
+                if name in matched_categories:
+                    continue
+                for pat in patterns:
+                    if pat.search(text):
+                        matched_categories.add(name)
+                        break
+            if len(matched_categories) >= self.min_hits:
+                return True
+        return False
+
+    def scan(self, comments: list[dict]) -> dict:
+        """详细扫描：返回每条评论的意图分布
+
+        Returns:
+            {"has_intent": bool, "categories": {name: count}, "hits": int}
+        """
+        result = {"has_intent": False, "categories": {}, "hits": 0}
+        cat_counts: dict[str, int] = {}
+        for c in comments:
+            text = c.get("text", "")
+            if not text:
+                continue
+            for name, patterns in self._compiled.items():
+                for pat in patterns:
+                    if pat.search(text):
+                        cat_counts[name] = cat_counts.get(name, 0) + 1
+                        break
+        result["categories"] = cat_counts
+        result["hits"] = len(cat_counts)
+        result["has_intent"] = len(cat_counts) >= self.min_hits
+        return result

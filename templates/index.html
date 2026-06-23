@@ -26,6 +26,26 @@
                         <label>🔑 搜索关键词</label>
                         <textarea id="keywords" placeholder="每行或逗号分隔，例如：&#10;PP non woven bag, cotton tote bag manufacturer&#10;无纺布袋, 帆布袋工厂"></textarea>
                         <div class="hint">输入行业/产品关键词，系统会搜索 TikTok 上相关视频并分析评论中的采购意向</div>
+
+                        <!-- 关键词扩展级别 -->
+                        <div class="expand-tier-row">
+                            <span class="expand-tier-label">📐 扩展深度</span>
+                            <label class="tier-radio">
+                                <input type="radio" name="expandTier" value="compact">
+                                <span class="tier-name">紧凑</span>
+                                <span class="tier-meta">~5词 · ~6分钟</span>
+                            </label>
+                            <label class="tier-radio checked">
+                                <input type="radio" name="expandTier" value="balanced" checked>
+                                <span class="tier-name">标准</span>
+                                <span class="tier-meta">~16词 · ~18分钟</span>
+                            </label>
+                            <label class="tier-radio">
+                                <input type="radio" name="expandTier" value="full">
+                                <span class="tier-name">全面</span>
+                                <span class="tier-meta">~45词 · ~38分钟</span>
+                            </label>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>🌍 目标地区</label>
@@ -88,6 +108,7 @@
             <div class="card-title">
                 <span class="icon">📡</span> 实时进度
                 <span class="progress-spinner" id="spinner"></span>
+                <button class="btn btn-danger btn-sm" id="stopBtn" onclick="stopAnalysis()" style="display:none;margin-left:12px">⏹ 停止并分析</button>
                 <span style="margin-left:auto;font-size:0.8rem;color:var(--text-dim)" id="elapsedTime"></span>
             </div>
             <div class="stage-bar" id="stageBar">
@@ -216,7 +237,8 @@
                 openai_key: document.getElementById('openaiKey').value.trim(),
                 openai_base_url: document.getElementById('openaiBaseUrl').value.trim(),
                 openai_model: document.getElementById('openaiModel').value,
-                use_ai: true
+                use_ai: true,
+                expand_tier: document.querySelector('input[name="expandTier"]:checked')?.value || 'balanced'
             };
 
             fetch('/api/start', {
@@ -228,6 +250,7 @@
             .then(res => {
                 if (res.error) { alert(res.error); resetStartBtn(); return; }
                 currentTaskId = res.task_id;
+                document.getElementById('stopBtn').style.display = 'inline-block';
                 connectSSE(currentTaskId);
             })
             .catch(err => {
@@ -240,6 +263,14 @@
             const btn = document.getElementById('startBtn');
             btn.disabled = false;
             btn.textContent = '🚀 开始分析';
+        }
+
+        function stopAnalysis() {
+            if (!currentTaskId) return;
+            const btn = document.getElementById('stopBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ 停止中...';
+            fetch('/api/stop/' + currentTaskId, { method: 'POST' });
         }
 
         function updateElapsed() {
@@ -286,6 +317,7 @@
                     updateElapsed();
                     resetStartBtn();
                     document.getElementById('spinner').style.display = 'none';
+                    document.getElementById('stopBtn').style.display = 'none';
                     setStage('export');
                     loadResults(taskId);
                 }
@@ -294,6 +326,7 @@
                     clearInterval(elapsedTimer);
                     resetStartBtn();
                     document.getElementById('spinner').style.display = 'none';
+                    document.getElementById('stopBtn').style.display = 'none';
                 }
             };
 
