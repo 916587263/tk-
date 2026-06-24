@@ -4,6 +4,15 @@
 # 修改后下次启动分析自动生效，无需重启 Web 服务
 # ============================================================
 
+# ── LLM 总开关 ──
+# enable_llm=false 时使用纯规则引擎 (QuickIntentScanner), 零 API 成本
+# enable_llm=true  时启用 CommentClassifier + AI 分析增强
+enable_llm: false                   # 测试阶段默认关闭
+llm_provider: deepseek              # openai | deepseek | 兼容 OpenAI 协议的任意服务
+llm_model: deepseek-chat            # deepseek-chat | gpt-4o-mini | gpt-4o
+# deepseek-chat 约 1/10 的 OpenAI 成本, 1M input ~$0.14
+llm_base_url: https://api.deepseek.com/v1
+
 # ── 阶段 3: 评论 LLM 分类 ──
 # 批量 LLM 调用, 对阶段 2 筛选出的视频进行深度评论意图分类
 comment_classifier:

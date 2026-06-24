@@ -479,22 +479,23 @@ class QuickIntentScanner:
         min_hits: 至少命中多少个独特意图类别才算"有意图"（默认 1）
     """
 
-    # 9 类采购意图关键词（精简版，提取核心高频词）
+    # 11 类采购意图关键词（精简版，提取核心高频词）
+    # 优先级权重: 用于 score_comments() 计算意图质量分
     INTENT_PATTERNS: dict[str, list[str]] = {
         "price_inquiry": [
-            r"\b(how much|price|pricing|cost|quote|报价|价格|多少钱|什么价)\b",
+            r"\b(how much|price|pricing|cost|quote|quotation|rfq|报价|价格|多少钱|什么价|价位|询价|求报价)\b",
         ],
         "moq_inquiry": [
-            r"\b(moq|minimum order|min order|起订|最小订单|最小起订量)\b",
+            r"\b(moq|minimum order|min order|minimum quantity|min qty|bulk order|起订|最小订单|最小起订量|起批量|最低订购量)\b",
         ],
         "supplier_search": [
-            r"\b(supplier|vendor|wholesaler|供应商|供货商|货源)\b",
+            r"\b(supplier|vendor|wholesaler|供应商|供货商|货源|寻源)\b",
         ],
         "factory_search": [
-            r"\b(factory|manufacturer|oem|odm|工厂|厂家|代工|贴牌|生产)\b",
+            r"\b(factory|manufacturer|oem|odm|custom manufactur|工厂|厂家|代工|贴牌|生产商|制造商)\b",
         ],
         "sample_request": [
-            r"\b(sample|样品|样本|打样|寄样)\b",
+            r"\b(sample|样品|样本|打样|寄样|拿样)\b",
         ],
         "contact_request": [
             r"\b(contact|whatsapp|wechat|email|dm me|联系|加我|私信|号码)|\+\d{7,}",
@@ -503,11 +504,32 @@ class QuickIntentScanner:
             r"\b(catalog|catalogue|brochure|lookbook|目录|图册|产品册|产品图)\b",
         ],
         "wholesale_request": [
-            r"\b(wholesale|bulk|large order|批发|大量|批量|囤货)\b",
+            r"\b(wholesale|bulk|large order|wholesale price|批发|大量|批量|囤货|大量采购)\b",
         ],
         "distributor_search": [
-            r"\b(distributor|agent|dealer|reseller|代理|经销|分销|加盟)\b",
+            r"\b(distributor|distribution|agent|dealer|reseller|exclusive agent|代理|经销|分销|加盟|独家代理|代理商)\b",
         ],
+        "importer_search": [
+            r"\b(importer|import\b|importing|进口商|进口|引进|buyer from|import from)\b",
+        ],
+        "private_label_request": [
+            r"\b(private label|white label|your brand|own brand|branding|自有品牌|贴牌|贴标|自己的品牌|oem brand)\b",
+        ],
+    }
+
+    # 类别权重: 用于 score_comments() 计算 actionable 和 quality
+    CATEGORY_WEIGHTS = {
+        "price_inquiry": 4,
+        "moq_inquiry": 4,
+        "supplier_search": 3,
+        "factory_search": 3,
+        "sample_request": 3,
+        "contact_request": 2,
+        "catalog_request": 2,
+        "wholesale_request": 4,
+        "distributor_search": 4,
+        "importer_search": 4,
+        "private_label_request": 3,
     }
 
     def __init__(self, min_hits: int = 1):
@@ -564,3 +586,71 @@ class QuickIntentScanner:
         result["hits"] = len(cat_counts)
         result["has_intent"] = len(cat_counts) >= self.min_hits
         return result
+
+    def score_comments(self, comments: list[dict]) -> dict:
+        """对评论列表进行商业意图评分, 返回 FinalScore 兼容的数据结构
+
+        不依赖 LLM, 纯规则引擎, 零成本。
+
+        Returns:
+            {
+                "intent_ratio": float,           # 有意图评论占比 (0.0-1.0)
+                "intent_quality_score": float,   # 意图质量分 (0-100), 基于类别权重
+                "intent_diversity": int,         # 命中的不同意图类别数 (0-11)
+                "categories_hit": list[str],     # 命中的类别名列表
+                "actionable_intent_count": int,  # 高权重意图评论数 (权重≥3)
+            }
+        """
+        total = len(comments)
+        if total == 0:
+            return {
+                "intent_ratio": 0.0,
+                "intent_quality_score": 0.0,
+                "intent_diversity": 0,
+                "categories_hit": [],
+                "actionable_intent_count": 0,
+            }
+
+        # 逐条评论扫描
+        comment_intents = []  # [(comment_idx, [category_names])]
+        all_categories_hit: set[str] = set()
+        actionable_count = 0
+
+        for ci, c in enumerate(comments):
+            text = c.get("text", "")
+            if not text:
+                continue
+            matched = []
+            for name, patterns in self._compiled.items():
+                for pat in patterns:
+                    if pat.search(text):
+                        matched.append(name)
+                        all_categories_hit.add(name)
+                        break  # 每个 category 只计一次
+            if matched:
+                comment_intents.append((ci, matched))
+                # 高权重意图 → actionable
+                if any(self.CATEGORY_WEIGHTS.get(m, 0) >= 3 for m in matched):
+                    actionable_count += 1
+
+        intent_count = len(comment_intents)
+        intent_ratio = intent_count / total
+
+        # 意图质量分: 基于命中评论的平均类别权重 × 25, 上限 100
+        if intent_count > 0:
+            total_weight = sum(
+                sum(self.CATEGORY_WEIGHTS.get(m, 1) for m in matched)
+                for _, matched in comment_intents
+            )
+            avg_weight_per_hit = total_weight / intent_count
+            intent_quality_score = min(100.0, avg_weight_per_hit * 25.0)
+        else:
+            intent_quality_score = 0.0
+
+        return {
+            "intent_ratio": round(intent_ratio, 4),
+            "intent_quality_score": round(intent_quality_score, 1),
+            "intent_diversity": len(all_categories_hit),
+            "categories_hit": sorted(all_categories_hit),
+            "actionable_intent_count": actionable_count,
+        }

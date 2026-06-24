@@ -464,22 +464,28 @@ class FinalScorer:
     def score_all(
         self,
         videos: list[dict],
-        classify_map: dict = None,  # {video_id: VideoClassifyResult}
+        classify_map: dict = None,  # {video_id: VideoClassifyResult or dict}
+        quick_intent_map: dict = None,  # {video_id: dict} QuickIntent fallback
     ) -> tuple[list[dict], list[dict]]:
         """批量终极评分, 返回 (全量评分视频, Top N 对标参考)
 
         Args:
             videos: 阶段 3 通过的视频列表
-            classify_map: {video_id: VideoClassifyResult}
+            classify_map: {video_id: VideoClassifyResult} (LLM 模式)
+            quick_intent_map: {video_id: dict} (规则模式, classify_map 为空时使用)
 
         Returns:
             (all_scored_videos, top_reference_videos)
         """
         classify_map = classify_map or {}
+        quick_intent_map = quick_intent_map or {}
 
         for v in videos:
             vid = v.get("id", "")
             cr = classify_map.get(vid)
+            # 规则引擎 fallback: 当 LLM 未运行时, 用 QuickIntent 分数
+            if cr is None and quick_intent_map:
+                cr = quick_intent_map.get(vid)
             result = self.score(v, cr)
 
             # 写入视频字段
@@ -543,7 +549,11 @@ class FinalScorer:
     # ── 商业意图综合评分 ──
 
     def _compute_intent_score(self, classify_result) -> float:
-        """从 CommentClassifier 的分类结果计算商业意图综合分 (0-100)
+        """从分类结果计算商业意图综合分 (0-100)
+
+        兼容两种输入:
+          - VideoClassifyResult 对象 (LLM 模式, 来自 CommentClassifier)
+          - dict (规则模式, 来自 QuickIntentScanner.score_comments())
 
         子维度:
           - intent_ratio (40%): 有意图评论占比 → 对数归一化
@@ -552,8 +562,16 @@ class FinalScorer:
         """
         cf = self.config
 
+        # 兼容属性访问 (对象) 和字典访问 (dict)
+        def _get(key, default=0.0):
+            if hasattr(classify_result, key):
+                return getattr(classify_result, key) or default
+            elif isinstance(classify_result, dict):
+                return classify_result.get(key, default)
+            return default
+
         # intent_ratio: 对数归一化 (基准 10% = 50 分)
-        ratio = classify_result.intent_ratio
+        ratio = _get("intent_ratio")
         if ratio > 0:
             ratio_score = min(100.0, 50 + 30 * math.log10(ratio / 0.10))
         else:
@@ -561,10 +579,10 @@ class FinalScorer:
         ratio_score = max(0.0, min(100.0, ratio_score))
 
         # intent_quality: 直接映射 (已为 0-100)
-        quality_score = classify_result.intent_quality_score
+        quality_score = _get("intent_quality_score")
 
         # intent_diversity: 阶梯映射
-        diversity = classify_result.intent_diversity
+        diversity = int(_get("intent_diversity"))
         if diversity >= 5:
             div_score = 100.0
         elif diversity >= 3:

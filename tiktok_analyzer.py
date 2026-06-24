@@ -10,6 +10,7 @@ TikTok 外贸行业对标视频发现系统 — CLI 主入口
 import argparse
 import asyncio
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -29,6 +30,7 @@ from tiktok_analyzer.keyword_expander import KeywordExpander, KeywordCache
 # ── 新管道 v2.0 模块 ──
 from tiktok_analyzer.unified_scorer import FinalScorer, FinalScorerConfig
 from tiktok_analyzer.comment_classifier import CommentClassifier, CommentClassifierConfig
+from tiktok_analyzer.intent_detector import QuickIntentScanner
 
 # ── DEPRECATED 旧管道模块 (保留导入避免 import error, 不再使用) ──
 # from tiktok_analyzer.account_filter import AccountFilter, AccountFilterConfig
@@ -175,70 +177,88 @@ async def main():
         )
 
         # ═══════════════════════════════════════════════════════════
-        # 阶段 3: LLM 评论意图分类 (批量, 3-5 次调用)
+        # 阶段 3: 商业意图评分
+        #   enable_llm=true  → CommentClassifier (LLM) 仅对 Top 20 候选
+        #   enable_llm=false → QuickIntentScanner (规则引擎, 零成本)
         # ═══════════════════════════════════════════════════════════
-        classify_map = {}  # {video_id: VideoClassifyResult}
+        classify_map = {}       # {video_id: VideoClassifyResult} LLM 结果
+        quick_intent_map = {}   # {video_id: dict} 规则引擎结果 (始终构建)
         intent_data = None
 
-        cc_cfg_dict = cfg.get("comment_classifier", {})
-        cc_cfg = CommentClassifierConfig(**{
-            k: v for k, v in cc_cfg_dict.items()
-            if k in CommentClassifierConfig.__dataclass_fields__
-        })
+        enable_llm = cfg.get("enable_llm", False)
+        llm_provider = cfg.get("llm_provider", "openai")
+        llm_model = cfg.get("llm_model", "gpt-4o-mini")
+        llm_base_url = cfg.get("llm_base_url", "")
 
-        if cc_cfg.enabled and deep_analyzed_videos and args.openai_key:
-            emit(f"阶段 3: LLM 评论意图分类 ({len(deep_analyzed_videos)} 条视频)...")
+        # ── 始终构建规则引擎分数 (零成本, Fallback) ──
+        quick_scanner = QuickIntentScanner(min_hits=1)
+        for v in deep_analyzed_videos:
+            deep_c = v.get("_deep_comments", [])
+            score_data = quick_scanner.score_comments(deep_c)
+            quick_intent_map[v.get("id", "")] = score_data
+            # 写入视频字段
+            v["intent_ratio"] = score_data["intent_ratio"]
+            v["intent_quality_score"] = score_data["intent_quality_score"]
+            v["intent_diversity"] = score_data["intent_diversity"]
+            v["actionable_intent_count"] = score_data["actionable_intent_count"]
+            v["categories_hit"] = score_data["categories_hit"]
+            v["is_weak_reference"] = (score_data["actionable_intent_count"] == 0)
+
+        emit(
+            f"阶段 3 (规则引擎): {len(deep_analyzed_videos)} 条视频完成意图评分 "
+            f"(命中类别: {sum(1 for s in quick_intent_map.values() if s['intent_diversity'] > 0)})"
+        )
+
+        # ── 可选 LLM 增强层 ──
+        api_key = args.openai_key or os.environ.get("DEEPSEEK_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+        if enable_llm and deep_analyzed_videos and api_key:
+            cc_cfg_dict = cfg.get("comment_classifier", {})
+            cc_cfg = CommentClassifierConfig(**{
+                k: v for k, v in cc_cfg_dict.items()
+                if k in CommentClassifierConfig.__dataclass_fields__
+            })
+
+            # LLM 仅分类 Top 20 候选视频 (不是全量)
+            candidates = sorted(
+                deep_analyzed_videos,
+                key=lambda v: v.get("actionable_intent_count", 0),
+                reverse=True
+            )[:20]
+            emit(f"阶段 3+ (LLM 增强): {llm_provider}/{llm_model} 分析 Top {len(candidates)} 候选视频...")
 
             openai_proxy = scraper._current_proxy
+            base_url = llm_base_url or args.openai_base or None
+            model = llm_model if llm_provider != "openai" else (args.openai_model or cc_cfg.model)
+
             classifier = CommentClassifier(
-                api_key=args.openai_key,
+                api_key=api_key,
                 config=cc_cfg,
-                base_url=args.openai_base or None,
-                model=cc_cfg.model,
+                base_url=base_url,
+                model=model,
                 proxy=openai_proxy,
             )
 
             try:
-                batch_result = await classifier.classify_videos(deep_analyzed_videos)
-
+                batch_result = await classifier.classify_videos(candidates)
+                llm_classify_map = {}
                 for vr in batch_result.video_results:
-                    classify_map[vr.video_id] = vr
-                    # 将分类结果写回视频
-                    for v in deep_analyzed_videos:
-                        if v.get("id") == vr.video_id:
-                            v["intent_ratio"] = vr.intent_ratio
-                            v["intent_quality_score"] = vr.intent_quality_score
-                            v["intent_diversity"] = vr.intent_diversity
-                            v["actionable_intent_count"] = vr.actionable_intent_count
-                            v["categories_hit"] = vr.categories_hit
-                            v["is_weak_reference"] = vr.is_weak_reference
-                            break
+                    llm_classify_map[vr.video_id] = vr
 
-                # ── 阶段 3.5: 轻量淘汰 ──
-                pre_filter_count = len(deep_analyzed_videos)
-                deep_analyzed_videos, intent_filtered_out = classifier.filter_low_intent(
-                    deep_analyzed_videos, classify_map
-                )
-                if intent_filtered_out:
-                    emit(
-                        f"阶段 3.5 轻量淘汰: {len(intent_filtered_out)}/{pre_filter_count} "
-                        f"条视频意图信号过弱, 不进入 FinalScore "
-                        f"(保留 {len(deep_analyzed_videos)} 条)"
-                    )
-                    for v in intent_filtered_out:
-                        deep_c = v.get("_deep_comments", [])
-                        for c in deep_c:
-                            c["account_username"] = v.get("account_username", "")
-                        all_comments.extend(deep_c)
-
-                # 将深度评论 + 分类结果加入 all_comments
-                for v in deep_analyzed_videos:
-                    deep_c = v.get("_deep_comments", [])
-                    vr = classify_map.get(v.get("id", ""))
+                # LLM 结果覆盖规则引擎结果 (仅对候选视频)
+                for v in candidates:
+                    vid = v.get("id", "")
+                    vr = llm_classify_map.get(vid)
                     if vr:
-                        classified_map = {
-                            cc.comment_index: cc for cc in vr.classified_comments
-                        }
+                        classify_map[vid] = vr
+                        v["intent_ratio"] = vr.intent_ratio
+                        v["intent_quality_score"] = vr.intent_quality_score
+                        v["intent_diversity"] = vr.intent_diversity
+                        v["actionable_intent_count"] = vr.actionable_intent_count
+                        v["categories_hit"] = vr.categories_hit
+                        v["is_weak_reference"] = vr.is_weak_reference
+                        # 标注评论的 has_intent/top_intent (仅深度评论)
+                        deep_c = v.get("_deep_comments", [])
+                        classified_map = {cc.comment_index: cc for cc in vr.classified_comments}
                         for ci, c in enumerate(deep_c):
                             cc = classified_map.get(ci)
                             if cc:
@@ -246,48 +266,32 @@ async def main():
                                 c["top_intent"] = cc.category
                                 c["top_intent_confidence"] = cc.intensity
                                 c["actionable"] = cc.actionable
-                    for c in deep_c:
-                        c["account_username"] = v.get("account_username", "")
-                    all_comments.extend(deep_c)
-
-                intent_summary = {
-                    "total_videos_analyzed": len(batch_result.video_results),
-                    "videos_with_intent": sum(
-                        1 for vr in batch_result.video_results if vr.intent_comments > 0
-                    ),
-                    "avg_intent_ratio": (
-                        sum(vr.intent_ratio for vr in batch_result.video_results)
-                        / max(1, len(batch_result.video_results))
-                    ),
-                    "total_actionable": sum(
-                        vr.actionable_intent_count for vr in batch_result.video_results
-                    ),
-                }
-                intent_data = {"summary": intent_summary, "classify_map": classify_map}
 
                 emit(
-                    f"意图分类完成: {intent_summary['videos_with_intent']}/{intent_summary['total_videos_analyzed']} "
-                    f"视频有采购意图, {intent_summary['total_actionable']} 条可转化商机 "
+                    f"LLM 增强完成: {len(llm_classify_map)} 条视频精确分类 "
                     f"(LLM 调用 {batch_result.total_llm_calls} 次)"
                 )
-
             except Exception as e:
-                logger.error("评论分类失败: %s", e)
-                emit(f"评论分类失败: {e}, 降级使用采样数据")
-                for v in deep_analyzed_videos:
-                    deep_c = v.get("_deep_comments", [])
-                    for c in deep_c:
-                        c["account_username"] = v.get("account_username", "")
-                    all_comments.extend(deep_c)
-
+                logger.warning("LLM 分类失败: %s, 降级使用规则引擎分数", e)
+                emit(f"LLM 分类失败: {e}, 降级使用规则引擎分数")
             finally:
                 await classifier.close()
 
-        elif not args.openai_key and deep_analyzed_videos:
-            emit("未设置 OpenAI Key, 跳过 LLM 意图分类")
+        elif enable_llm and not api_key and deep_analyzed_videos:
+            emit("未设置 API Key (DEEPSEEK_API_KEY / OPENAI_API_KEY), 使用规则引擎")
+        elif not enable_llm and deep_analyzed_videos:
+            emit("LLM 增强已关闭 (enable_llm=false), 使用规则引擎")
+
+        # 将深度评论加入 all_comments
+        for v in deep_analyzed_videos:
+            deep_c = v.get("_deep_comments", [])
+            for c in deep_c:
+                c["account_username"] = v.get("account_username", "")
+            all_comments.extend(deep_c)
 
         # ═══════════════════════════════════════════════════════════
         # 阶段 4: FinalScore 终极统一评分 (三权重 30/30/40)
+        # 同时接受 LLM 和规则引擎的意图分数
         # ═══════════════════════════════════════════════════════════
         fs_cfg_dict = cfg.get("final_scorer", {})
         fs_cfg = FinalScorerConfig(**{
@@ -296,18 +300,19 @@ async def main():
         })
 
         top_references = []
+        tiers = {}
         if fs_cfg.enabled and deep_analyzed_videos:
             emit("阶段 4: FinalScore 终极评分 (30/30/40)...")
 
             final_scorer = FinalScorer(fs_cfg)
             all_scored, top_references = final_scorer.score_all(
-                deep_analyzed_videos, classify_map
+                deep_analyzed_videos, classify_map,
+                quick_intent_map=quick_intent_map  # 规则引擎 fallback
             )
 
             # 账号级聚合
             all_accounts = final_scorer.aggregate_accounts(top_references, all_accounts)
 
-            tiers = {}
             for v in all_scored:
                 t = v.get("tier", "D")
                 tiers[t] = tiers.get(t, 0) + 1
@@ -326,11 +331,13 @@ async def main():
                     )
                 emit(f"  对标 Top 5: {' | '.join(summaries)}")
 
-            # 为每个 Top 视频构建意图摘要
+            # 构建意图摘要 (兼容 LLM 和规则引擎数据源)
             for v in top_references:
                 vid = v.get("id", "")
                 vr = classify_map.get(vid)
+                qi = quick_intent_map.get(vid, {})
                 if vr:
+                    # LLM 模式: 精确分类的意图评论
                     intent_comments = sorted(
                         [c for c in vr.classified_comments if c.has_intent],
                         key=lambda c: c.intensity, reverse=True
@@ -346,10 +353,16 @@ async def main():
                     v["purchase_intent_ratio"] = vr.intent_ratio
                     v["purchase_intent_comments"] = vr.intent_comments
                 else:
-                    v["intent_summary"] = {"intent_ratio": 0, "top_categories": [], "sample_comments": []}
-                    v["purchase_intent_ratio"] = 0
-                    v["purchase_intent_comments"] = 0
-
+                    # 规则引擎模式: 从 QuickIntent 构建摘要
+                    v["intent_summary"] = {
+                        "intent_ratio": qi.get("intent_ratio", 0),
+                        "top_categories": qi.get("categories_hit", [])[:5],
+                        "sample_comments": [],
+                    }
+                    v["purchase_intent_ratio"] = qi.get("intent_ratio", 0)
+                    v["purchase_intent_comments"] = int(
+                        qi.get("intent_ratio", 0) * len(v.get("_deep_comments", []))
+                    )
         else:
             top_references = deep_analyzed_videos[:20]
             emit(f"FinalScore 未启用/无深度视频, Top {len(top_references)} 条直接作为参考")

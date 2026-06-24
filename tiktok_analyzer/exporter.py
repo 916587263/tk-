@@ -286,16 +286,17 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
         lines.append(f"|------|------|------|------|------|------|")
     accounts_sorted = sorted(
         scraped_data.get("accounts", []),
-        key=lambda x: x.get("reference_value", x.get("follower_count", 0)) or 0,
+        key=lambda x: _safe_num(x.get("reference_value", x.get("follower_count", 0))),
         reverse=True
     )
     for i, a in enumerate(accounts_sorted[:20], 1):
         if has_scores:
             rv = a.get("reference_value", a.get("score", "-"))
+            rv_num = _safe_num(rv, -1)
             lines.append(
                 f"| {i} | @{a.get('username', '')} | {a.get('nickname', '')} | "
                 f"{_fmt_count(a.get('follower_count', 0))} | {_fmt_count(a.get('like_count', 0))} | "
-                f"{rv}{'⭐' if rv > 60 else ''} | "
+                f"{rv}{'⭐' if rv_num > 60 else ''} | "
                 f"{a.get('reference_video_count', a.get('tier', ''))} | "
                 f"{a.get('bio', '')[:50]} |"
             )
@@ -314,7 +315,7 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
     lines.append(f"|------|------|------|------|------|------|")
     videos_sorted = sorted(
         scraped_data.get("videos", []),
-        key=lambda x: x.get("digg_count", 0) or 0,
+        key=lambda x: _safe_num(x.get("digg_count", 0)),
         reverse=True
     )
     for i, v in enumerate(videos_sorted[:20], 1):
@@ -332,7 +333,8 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
     if not reference_videos:
         reference_videos = sorted(
             [v for v in all_videos if v.get("is_top_reference")],
-            key=lambda x: x.get("final_score", x.get("reference_score", 0)), reverse=True
+            key=lambda x: _safe_num(x.get("final_score", x.get("reference_score", 0))),
+            reverse=True
         )
     if reference_videos:
         lines.append(f"## 🎯 对标参考视频 TOP {len(reference_videos)}")
@@ -485,7 +487,7 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
         lines.append(f"- **含采购意向评论数**: {intent_total} 条")
         lines.append(f"- **采购意向占比**: {intent_total / max(comment_total, 1):.1%}")
         lines.append(f"")
-        by_intent = sorted(reference_vids, key=lambda x: x.get("purchase_intent_ratio", 0), reverse=True)[:5]
+        by_intent = sorted(reference_vids, key=lambda x: _safe_num(x.get("purchase_intent_ratio", 0)), reverse=True)[:5]
         lines.append(f"### 采购意向最高的视频")
         lines.append(f"")
         lines.append(f"| # | 账号 | 描述 | 采购意向评论 | 采购意向占比 | 评分 |")
@@ -568,6 +570,16 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
 
     logger.info("Markdown 报告已导出: %s", md_file)
     return str(md_file)
+
+
+def _safe_num(v, default=0):
+    """安全转数值, 处理 str/int/float/None 混合类型"""
+    if v is None or v == "" or v == "-":
+        return default
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return default
 
 
 def _fmt_count(n) -> str:
