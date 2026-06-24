@@ -71,6 +71,7 @@ class CommentClassifierConfig:
 @dataclass
 class ClassifiedComment:
     """单条评论的分类结果"""
+    video_index: int = 0            # ⚠️ 关键字段: 归属视频在批次中的索引, 聚合时必须保留
     comment_index: int = 0
     text: str = ""
     has_intent: bool = False
@@ -359,7 +360,12 @@ class CommentClassifier:
         for item in items:
             if not isinstance(item, dict):
                 continue
+            # ⚠️ video_index 是聚合分组的关键字段, 必须从 LLM 响应中保留
+            vi = item.get("video_index", 0)
+            if not isinstance(vi, int):
+                vi = int(vi) if vi is not None else 0
             results.append(ClassifiedComment(
+                video_index=vi,
                 comment_index=item.get("comment_index", 0),
                 text=item.get("text", ""),
                 has_intent=item.get("has_intent", False),
@@ -379,10 +385,30 @@ class CommentClassifier:
         # 按 video_index 分组
         groups: dict[int, list[ClassifiedComment]] = {i: [] for i in range(len(videos))}
         for c in classified:
-            # video_index 从 LLM 响应中提取不到时, 用 comment_index 推算
-            vi = getattr(c, 'video_index', 0)
-            if vi < len(videos):
+            vi = c.video_index  # 直接访问字段 (修复后 video_index 已正确保留)
+            if 0 <= vi < len(videos):
                 groups[vi].append(c)
+            else:
+                logger.warning(
+                    "ClassifiedComment video_index=%d 越界 (batch_size=%d), 丢弃",
+                    vi, len(videos)
+                )
+
+        # ── 完整性校验: 检测是否有视频被错误地分配了 0 条分类结果 ──
+        # 如果某视频有深度评论但分类结果为空, 可能是 LLM 未正确返回 video_index
+        empty_videos = []
+        for vi, v in enumerate(videos):
+            if not groups[vi]:
+                deep_count = len(v.get("_deep_comments", []) or v.get("comments", []))
+                if deep_count > 0:
+                    empty_videos.append((vi, v.get("id", "?"), deep_count))
+        if empty_videos:
+            logger.warning(
+                "_aggregate_by_video: %d/%d 个视频有评论但无分类结果, "
+                "可能是 LLM 未返回 video_index. 详情: %s",
+                len(empty_videos), len(videos),
+                [(vi, vid, cnt) for vi, vid, cnt in empty_videos]
+            )
 
         results = []
         for vi, v in enumerate(videos):

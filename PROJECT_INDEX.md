@@ -158,9 +158,16 @@ final_score = sigmoid(raw, center=50, steepness=15)
 8. ✅ 管道策略重构 v2.0 — QuickScore + 两阶段评论 + FinalScore 统一评分 (2026-06-23)
 9. ✅ 管道验证框架 — validate_pipeline.py: 10章对比报告 + 漏斗分析 + Token拆解 + 误杀溯源 (2026-06-23)
 10. 关键词扩展优化 — LLM驱动 + 聚类去重 + 搜索价值评分 (暂停)
-11. 稀疏测试覆盖 — 仅基础后端单元测试 + CDP端到端测试，无管道级集成测试 (待补充)
+11. ✅ 管道级集成测试 — tests/test_pipeline_e2e.py: 16 tests/68 assertions, 覆盖 QuickScore→QuickIntent→Classify→FinalScore (2026-06-24)
 12. 历史对比/趋势追踪 — 无法对比多次分析结果 (暂停)
-13. 高价值误杀率优化 — QuickScore 硬淘汰规则需调整: desc含商业词时免除硬淘汰 (待修复)
+13. 🔧 高价值误杀率优化 — 部分修复: industry_keywords 同步白名单 5 词 + personal_patterns 移除 daily, 误杀从 5/8 降至 1/8. 剩余: min_likes_no_comment=5 硬淘汰阈值仍过严 (2026-06-24)
+
+## 修复记录 (2026-06-24)
+
+- **P0** `comment_classifier.py`: ClassifiedComment 新增 video_index 字段，修复阶段 3 LLM 分类结果 83% 错配 bug
+- **P1-A** `tiktok_analyzer.py`: CLI 入口统一使用新管道 v2.0 (CommentClassifier + FinalScorer + analyze_top_references)
+- **P1-B** `tests/test_pipeline_e2e.py`: 新增管道端到端集成测试 (16 tests / 68 assertions)
+- **P2** `config.yaml`: industry_keywords 新增 odm/moq/distributor/importer/exporter; personal_account_patterns 移除 daily
 
 ## 实验与验证工具
 
@@ -176,6 +183,9 @@ final_score = sigmoid(raw, center=50, steepness=15)
 - `verify_quickintent.py` — QuickIntent 淘汰验证 (采样 vs 全量评论对比)
   - 从淘汰视频随机抽样，对比 8条采样 vs 30-50条全量的商业信号命中
   - 输出: 漏检率 / 漏检视频清单 / 被遗漏的具体商业句子
+- `tests/test_video_index_fix.py` — P0 回归: ClassifiedComment video_index 全链路保留 (4 tests / 15 assertions)
+- `tests/test_pipeline_e2e.py` — 管道集成: QuickScore → QuickIntent → Classify → FinalScore (16 tests / 68 assertions)
+- `tests/diagnose_issue13.py` — Issue #13 诊断: B2B 场景误杀量化分析
 - `test_backend.py` — 后端组件单元测试 (Mock数据)
 - `test_cdp.py` — CDP端到端测试 (通过 /api/start + /api/progress SSE)
 

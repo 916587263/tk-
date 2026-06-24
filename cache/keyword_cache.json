@@ -127,6 +127,31 @@
         }
       },
       "cached_at": "2026-06-23T10:29:25.038491"
+    },
+    "1d5e76d619e17fbb": {
+      "result": {
+        "keywords": [
+          "Nike",
+          "Nike factory",
+          "Nike supplier",
+          "Nike product",
+          "Nike manufacturer"
+        ],
+        "original": [
+          "Nike"
+        ],
+        "tier": "compact",
+        "count": 5,
+        "added": 4,
+        "breakdown": {
+          "*": 1,
+          "* factory": 1,
+          "* supplier": 1,
+          "* product": 1,
+          "* manufacturer": 1
+        }
+      },
+      "cached_at": "2026-06-24T16:08:26.466970"
     }
   }
 }

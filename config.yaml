@@ -71,8 +71,13 @@ quick_scorer:
     - export
     - factory direct
     - oem
+    - odm
+    - moq
     - manufacturing
     - production
+    - distributor
+    - importer
+    - exporter
     - 工厂
     - 厂家
     - 供应商
@@ -88,7 +93,6 @@ quick_scorer:
     - fandom
     - stan
     - updates
-    - daily
     - vlog
     - entertainment
     - 粉丝
