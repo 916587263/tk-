@@ -1465,44 +1465,110 @@ class TikTokScraper:
             else:
                 return await self._sample_first_n(video_id, count)
         except Exception:
+            logger.exception(
+                "_sample_comments vid=%s: 采样异常 (page状态/网络/CDP连接?)", video_id
+            )
             return []
 
     async def _sample_first_n(self, video_id: str, count: int) -> list[dict]:
-        """策略 A: 前 N 条评论 (TikTok 默认 hot 排序)"""
-        result = await self._page.evaluate("""
-            async (videoId, count) => {
-                try {
-                    const url = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=${count}&cursor=0`;
-                    const res = await fetch(url);
-                    if (!res.ok) {
-                        return {error: 'HTTP ' + res.status, url: url};
+        """策略 A: 前 N 条评论 (TikTok 默认 hot 排序)
+
+        三级 fallback:
+          1. page.evaluate() + fetch() — 浏览器内 fetch, 最自然
+          2. page.evaluate() 同步 XHR  — 无异步依赖
+          3. page.request.get()       — Playwright 原生, 绕过 JS 上下文
+        """
+        # ── 方法 1: page.evaluate() 异步 fetch ──
+        try:
+            result = await self._page.evaluate("""
+                async (videoId, count) => {
+                    try {
+                        const url = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=${count}&cursor=0`;
+                        const res = await fetch(url);
+                        if (!res.ok) {
+                            return {error: 'HTTP ' + res.status, url: url};
+                        }
+                        const data = await res.json();
+                        const comments = (data.comments || []).map(c => ({
+                            text: c.text || '',
+                            likes: c.digg_count || 0,
+                            username: c.user?.unique_id || '',
+                            time: c.create_time || 0,
+                        }));
+                        return {ok: true, count: comments.length, comments: comments};
+                    } catch(e) {
+                        return {error: e.message || String(e)};
                     }
-                    const data = await res.json();
-                    const comments = (data.comments || []).map(c => ({
-                        text: c.text || '',
-                        likes: c.digg_count || 0,
-                        username: c.user?.unique_id || '',
-                        time: c.create_time || 0,
-                    }));
-                    return {ok: true, count: comments.length, comments: comments};
-                } catch(e) {
-                    return {error: e.message || String(e)};
                 }
-            }
-        """, video_id, count)
-        if isinstance(result, dict) and "error" in result:
-            logger.warning(
-                "_sample_first_n vid=%s error: %s", video_id, result["error"]
-            )
-            return []
-        if isinstance(result, dict) and result.get("ok"):
-            if result["count"] == 0:
-                logger.info(
-                    "_sample_first_n vid=%s: API OK but 0 comments (视频可能无评论)",
-                    video_id
+            """, video_id, count)
+
+            if isinstance(result, dict) and "error" in result:
+                logger.warning(
+                    "_sample_first_n vid=%s [fetch]: %s", video_id, result["error"]
                 )
-            return result.get("comments", [])
-        return result if isinstance(result, list) else []
+            elif isinstance(result, dict) and result.get("ok"):
+                if result["count"] == 0:
+                    logger.info(
+                        "_sample_first_n vid=%s [fetch]: API OK but 0 comments",
+                        video_id
+                    )
+                else:
+                    logger.info(
+                        "_sample_first_n vid=%s [fetch]: 成功抓取 %d 条评论",
+                        video_id, result["count"]
+                    )
+                return result.get("comments", [])
+            else:
+                logger.warning(
+                    "_sample_first_n vid=%s [fetch]: 意外返回值 type=%s, 尝试 fallback",
+                    video_id, type(result).__name__
+                )
+        except Exception as e:
+            logger.warning(
+                "_sample_first_n vid=%s [fetch]: page.evaluate 异常 — %s: %s",
+                video_id, type(e).__name__, str(e)[:200]
+            )
+
+        # ── 方法 2: page.request.get() — Playwright 原生 HTTP, 共享 cookie jar ──
+        try:
+            url = f"https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id={video_id}&count={count}&cursor=0"
+            resp = await self._page.request.get(url, headers={
+                "Referer": "https://www.tiktok.com/",
+                "Accept": "application/json, text/plain, */*",
+            })
+            if resp.ok:
+                data = await resp.json()
+                comments_raw = data.get("comments", [])
+                comments = []
+                for c in comments_raw:
+                    user = c.get("user", {}) or {}
+                    comments.append({
+                        "video_id": video_id,
+                        "text": c.get("text", ""),
+                        "username": user.get("unique_id", user.get("uniqueId", "")),
+                        "likes": c.get("digg_count", 0) or c.get("like_count", 0),
+                        "time": c.get("create_time", "") or c.get("createTime", ""),
+                    })
+                logger.info(
+                    "_sample_first_n vid=%s [request]: 成功抓取 %d 条评论 (API total=%s)",
+                    video_id, len(comments), data.get("total", "?")
+                )
+                return comments[:count]
+            else:
+                logger.warning(
+                    "_sample_first_n vid=%s [request]: HTTP %s",
+                    video_id, resp.status
+                )
+        except Exception as e:
+            logger.warning(
+                "_sample_first_n vid=%s [request]: 异常 — %s: %s",
+                video_id, type(e).__name__, str(e)[:200]
+            )
+
+        logger.error(
+            "_sample_first_n vid=%s: 所有方法均失败, 返回 0 条评论", video_id
+        )
+        return []
 
     async def _sample_top_and_latest(self, video_id: str, count: int) -> list[dict]:
         """策略 B: Top N/2 (cursor=0) + 更深分页 N/2 (cursor=N)
@@ -1511,30 +1577,55 @@ class TikTokScraper:
         提高捕获偶然商业评论的概率。
         """
         half = max(1, count // 2)
-        result = await self._page.evaluate("""
-            async (videoId, count, half) => {
-                try {
-                    const base = 'https://www.tiktok.com/api/comment/list/'
-                               + '?aid=1988&aweme_id=' + videoId;
-                    const [topRes, laterRes] = await Promise.all([
-                        fetch(base + '&count=' + half + '&cursor=0'),
-                        fetch(base + '&count=' + (count - half) + '&cursor=' + count)
-                    ]);
-                    const topData = await topRes.json();
-                    const laterData = await laterRes.json();
-                    const top = (topData.comments || []).map(c => ({
-                        text: c.text || '', likes: c.digg_count || 0,
-                        username: c.user?.unique_id || '', time: c.create_time || 0,
-                    }));
-                    const later = (laterData.comments || []).map(c => ({
-                        text: c.text || '', likes: c.digg_count || 0,
-                        username: c.user?.unique_id || '', time: c.create_time || 0,
-                    }));
-                    return [...top, ...later];
-                } catch(e) { return []; }
-            }
-        """, video_id, count, half)
-        return result or []
+        try:
+            result = await self._page.evaluate("""
+                async (videoId, count, half) => {
+                    try {
+                        const base = 'https://www.tiktok.com/api/comment/list/'
+                                   + '?aid=1988&aweme_id=' + videoId;
+                        const [topRes, laterRes] = await Promise.all([
+                            fetch(base + '&count=' + half + '&cursor=0'),
+                            fetch(base + '&count=' + (count - half) + '&cursor=' + count)
+                        ]);
+                        const topData = await topRes.json();
+                        const laterData = await laterRes.json();
+                        const top = (topData.comments || []).map(c => ({
+                            text: c.text || '', likes: c.digg_count || 0,
+                            username: c.user?.unique_id || '', time: c.create_time || 0,
+                        }));
+                        const later = (laterData.comments || []).map(c => ({
+                            text: c.text || '', likes: c.digg_count || 0,
+                            username: c.user?.unique_id || '', time: c.create_time || 0,
+                        }));
+                        return {ok: true, comments: [...top, ...later]};
+                    } catch(e) { return {error: e.message || String(e)}; }
+                }
+            """, video_id, count, half)
+            if isinstance(result, dict) and result.get("ok"):
+                comments = result.get("comments", [])
+                logger.info(
+                    "_sample_top_and_latest vid=%s [fetch]: %d 条评论",
+                    video_id, len(comments)
+                )
+                return comments
+            elif isinstance(result, dict) and "error" in result:
+                logger.warning(
+                    "_sample_top_and_latest vid=%s [fetch]: %s", video_id, result["error"]
+                )
+            else:
+                logger.warning(
+                    "_sample_top_and_latest vid=%s [fetch]: 意外返回值 type=%s",
+                    video_id, type(result).__name__
+                )
+        except Exception as e:
+            logger.warning(
+                "_sample_top_and_latest vid=%s [fetch]: page.evaluate 异常 — %s: %s",
+                video_id, type(e).__name__, str(e)[:200]
+            )
+
+        # fallback: page.request (降级为 first_n, 无法模拟 top+latest 混合)
+        logger.info("_sample_top_and_latest vid=%s: 降级为 page.request first_n", video_id)
+        return await self._sample_first_n(video_id, count)
 
     async def _sample_random_from_pool(
         self, video_id: str, count: int, pool_size: int = 30
@@ -1546,37 +1637,100 @@ class TikTokScraper:
         可能捕获到被热评压制的商业询盘。
         """
         import random as _random
-        result = await self._page.evaluate("""
-            async (videoId, poolSize) => {
-                try {
-                    const url = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=${poolSize}&cursor=0`;
-                    const res = await fetch(url);
-                    if (!res.ok) {
-                        return {error: 'HTTP ' + res.status};
-                    }
-                    const data = await res.json();
-                    const comments = (data.comments || []).map(c => ({
-                        text: c.text || '',
-                        likes: c.digg_count || 0,
-                        username: c.user?.unique_id || '',
-                        time: c.create_time || 0,
-                    }));
-                    return {ok: true, count: comments.length, comments: comments};
-                } catch(e) {
-                    return {error: e.message || String(e)};
-                }
-            }
-        """, video_id, pool_size)
 
-        if isinstance(result, dict) and "error" in result:
+        def _extract_comments_from_result(result) -> list[dict]:
+            """从 fetch 结果中提取评论列表"""
+            if isinstance(result, dict) and result.get("ok"):
+                return result.get("comments", [])
+            return []
+
+        # ── 方法 1: page.evaluate() + fetch ──
+        pool = []
+        try:
+            result = await self._page.evaluate("""
+                async (videoId, poolSize) => {
+                    try {
+                        const url = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=${poolSize}&cursor=0`;
+                        const res = await fetch(url);
+                        if (!res.ok) {
+                            return {error: 'HTTP ' + res.status};
+                        }
+                        const data = await res.json();
+                        const comments = (data.comments || []).map(c => ({
+                            text: c.text || '',
+                            likes: c.digg_count || 0,
+                            username: c.user?.unique_id || '',
+                            time: c.create_time || 0,
+                        }));
+                        return {ok: true, count: comments.length, comments: comments};
+                    } catch(e) {
+                        return {error: e.message || String(e)};
+                    }
+                }
+            """, video_id, pool_size)
+
+            if isinstance(result, dict) and "error" in result:
+                logger.warning(
+                    "_sample_random_from_pool vid=%s [fetch]: %s", video_id, result["error"]
+                )
+            elif isinstance(result, dict) and result.get("ok"):
+                pool = result.get("comments", [])
+                logger.info(
+                    "_sample_random_from_pool vid=%s [fetch]: 抓取 %d 条 (池=%d)",
+                    video_id, len(pool), pool_size
+                )
+            else:
+                logger.warning(
+                    "_sample_random_from_pool vid=%s [fetch]: 意外返回值 type=%s",
+                    video_id, type(result).__name__
+                )
+        except Exception as e:
             logger.warning(
-                "_sample_random_from_pool vid=%s error: %s", video_id, result["error"]
+                "_sample_random_from_pool vid=%s [fetch]: page.evaluate 异常 — %s: %s",
+                video_id, type(e).__name__, str(e)[:200]
+            )
+
+        # ── 方法 2: page.request.get() fallback ──
+        if not pool:
+            try:
+                url = f"https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id={video_id}&count={pool_size}&cursor=0"
+                resp = await self._page.request.get(url, headers={
+                    "Referer": "https://www.tiktok.com/",
+                    "Accept": "application/json, text/plain, */*",
+                })
+                if resp.ok:
+                    data = await resp.json()
+                    comments_raw = data.get("comments", [])
+                    for c in comments_raw:
+                        user = c.get("user", {}) or {}
+                        pool.append({
+                            "video_id": video_id,
+                            "text": c.get("text", ""),
+                            "username": user.get("unique_id", user.get("uniqueId", "")),
+                            "likes": c.get("digg_count", 0) or c.get("like_count", 0),
+                            "time": c.get("create_time", "") or c.get("createTime", ""),
+                        })
+                    logger.info(
+                        "_sample_random_from_pool vid=%s [request]: 抓取 %d 条",
+                        video_id, len(pool)
+                    )
+                else:
+                    logger.warning(
+                        "_sample_random_from_pool vid=%s [request]: HTTP %s",
+                        video_id, resp.status
+                    )
+            except Exception as e:
+                logger.warning(
+                    "_sample_random_from_pool vid=%s [request]: 异常 — %s: %s",
+                    video_id, type(e).__name__, str(e)[:200]
+                )
+
+        if not pool:
+            logger.error(
+                "_sample_random_from_pool vid=%s: 所有方法均失败", video_id
             )
             return []
-        if isinstance(result, dict) and result.get("ok"):
-            pool = result.get("comments", [])
-        else:
-            pool = result if isinstance(result, list) else []
+
         if len(pool) <= count:
             return pool
         return _random.sample(pool, count)
