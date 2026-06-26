@@ -4,12 +4,15 @@ __pycache__/
 *.pyo
 *.db
 data/
-checkpoints/*.db
-logs/*.log
+checkpoints/
+logs/
 cookies/
 browser_profile/
+cache/
 proxies.json
+config.yaml
 .env
 .venv/
 *.egg-info/
 dist/
+*.log

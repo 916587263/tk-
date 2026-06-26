@@ -10,6 +10,9 @@ import time
 from pathlib import Path
 from datetime import datetime
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import Flask, render_template, request, jsonify, Response, send_file, session
 
 from tiktok_analyzer.scraper import TikTokScraper
@@ -34,7 +37,7 @@ from tiktok_analyzer.intent_detector import QuickIntentScanner
 # from tiktok_analyzer.reference_video_scorer import ReferenceVideoScorer, ReferenceVideoScorerConfig
 
 app = Flask(__name__)
-app.secret_key = "tiktok-analyzer-secret-key-2024"
+app.secret_key = os.getenv("SECRET_KEY", "tiktok-analyzer-dev-key-change-in-production")
 logger = setup_logger("webapp")
 
 BASE_DIR = Path(__file__).parent
@@ -236,6 +239,8 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
         proxy_pool=proxy_pool,
         checkpoint=checkpoint,
         progress_callback=progress_cb,
+        locale=cfg.get("locale", "zh-CN"),
+        timezone_id=cfg.get("timezone_id", "Asia/Shanghai"),
     )
 
     # 存储 scraper 引用，供 /api/stop 跨线程调用 cancel()
@@ -693,6 +698,7 @@ def task_results(task_id):
 # ═══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    debug_mode = os.getenv("FLASK_ENV", "development") == "development"
     print("=" * 60)
     print("  TikTok 竞争对手分析系统 v1.0")
     print("  打开浏览器访问: http://127.0.0.1:5000")
@@ -702,4 +708,4 @@ if __name__ == "__main__":
     else:
         print("  未检测到代理配置（可创建 proxies.json 启用代理）")
     print("=" * 60)
-    app.run(host="127.0.0.1", port=5000, debug=True, threaded=True)
+    app.run(host="127.0.0.1", port=5000, debug=debug_mode, threaded=True)

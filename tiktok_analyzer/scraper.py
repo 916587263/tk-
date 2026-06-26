@@ -236,12 +236,16 @@ class TikTokScraper:
         proxy_pool: Optional[ProxyPool] = None,
         checkpoint: Optional[CheckpointManager] = None,
         progress_callback=None,
+        locale: str = "zh-CN",
+        timezone_id: str = "Asia/Shanghai",
     ):
         self.browser_channel = browser_channel
         self.headless = headless
         self.proxy_pool = proxy_pool
         self.checkpoint = checkpoint
         self.progress_callback = progress_callback  # async callback(task_id, msg, data)
+        self.locale = locale
+        self.timezone_id = timezone_id
 
         self._playwright = None
         self._browser = None
@@ -419,8 +423,8 @@ class TikTokScraper:
             context_options = {
                 "user_data_dir": str(udd),
                 "viewport": {"width": 1920, "height": 1080},
-                "locale": "zh-CN",
-                "timezone_id": "Asia/Shanghai",
+                "locale": self.locale,
+                "timezone_id": self.timezone_id,
                 "user_agent": COMMON_UA,
                 "bypass_csp": True,
             }
@@ -437,8 +441,8 @@ class TikTokScraper:
             self._browser = await self._playwright.chromium.launch(**launch_options)
             context_options = {
                 "viewport": {"width": 1920, "height": 1080},
-                "locale": "zh-CN",
-                "timezone_id": "Asia/Shanghai",
+                "locale": self.locale,
+                "timezone_id": self.timezone_id,
                 "user_agent": COMMON_UA,
                 "bypass_csp": True,
             }

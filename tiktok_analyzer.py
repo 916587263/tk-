@@ -16,6 +16,9 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+from dotenv import load_dotenv
+load_dotenv()
+
 BASE_DIR = Path(__file__).parent
 sys.path.insert(0, str(BASE_DIR))
 
@@ -131,6 +134,8 @@ async def main():
         proxy_pool=proxy_pool,
         checkpoint=checkpoint,
         progress_callback=progress_cb,
+        locale=cfg.get("locale", "zh-CN"),
+        timezone_id=cfg.get("timezone_id", "Asia/Shanghai"),
     )
 
     try:

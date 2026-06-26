@@ -2,6 +2,7 @@
 TikTok 竞争对手分析系统 - 日志模块
 """
 import logging
+import os
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -27,6 +28,12 @@ def setup_logger(name: str = "tiktok_analyzer") -> logging.Logger:
 
     logger.setLevel(logging.DEBUG)
 
+    # 从环境变量读取日志级别（默认 INFO）
+    _log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    _level_map = {"DEBUG": logging.DEBUG, "INFO": logging.INFO,
+                  "WARNING": logging.WARNING, "ERROR": logging.ERROR}
+    console_level = _level_map.get(_log_level, logging.INFO)
+
     fmt = logging.Formatter(
         "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
@@ -36,7 +43,7 @@ def setup_logger(name: str = "tiktok_analyzer") -> logging.Logger:
     import io
     utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     ch = logging.StreamHandler(utf8_stdout)
-    ch.setLevel(logging.INFO)
+    ch.setLevel(console_level)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
 

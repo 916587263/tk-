@@ -2,7 +2,8 @@
 Backend component unit tests for TikTok Analyzer
 """
 import sys, io, json, os, shutil, tempfile
-sys.path.insert(0, r"C:\Users\Administrator\Documents\=tk")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 print("=" * 60)

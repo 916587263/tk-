@@ -1,0 +1,18 @@
+[project]
+name = "tiktok-analyzer"
+version = "1.0.0"
+description = "TikTok 外贸行业对标视频发现系统"
+requires-python = ">=3.9"
+dependencies = [
+    "playwright>=1.40.0",
+    "flask>=3.0.0",
+    "openai>=2.0.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --tb=short"

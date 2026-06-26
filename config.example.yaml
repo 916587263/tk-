@@ -3,6 +3,11 @@
 # 复制为 config.yaml 后修改即可生效，无需重启 Web 服务
 # ============================================================
 
+# ── 浏览器区域设置 ──
+# 影响 TikTok 内容推荐语言和地区
+locale: zh-CN                       # 浏览器 locale (en-US / zh-CN / ...)
+timezone_id: Asia/Shanghai          # 浏览器时区
+
 # ── LLM 总开关 ──
 # enable_llm=false 时使用纯规则引擎 (QuickIntentScanner), 零 API 成本
 # enable_llm=true  时启用 CommentClassifier + AI 分析增强
