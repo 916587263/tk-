@@ -55,7 +55,8 @@ quick_scorer:
   weight_relevance: 0.50            # 产品相关度权重
   weight_quality: 0.50              # 视频质量权重
   min_score: 20.0                   # 低于此分直接淘汰
-  min_likes_no_comment: 5           # 无评论时最低点赞数
+  min_likes_no_comment: 5           # 点赞<此值 AND 评论=0 → 触发降权 (非硬淘汰)
+  low_engagement_multiplier: 0.60   # 低互动视频降权系数 (0=硬淘汰, 1=不降权, 推荐0.60)
   play_benchmark: 100000            # 播放量基准 (50分参考线)
   engagement_benchmark: 0.05        # 互动率基准 (5%=50分)
   personal_account_penalty: 30.0    # 个人/娱乐号降分幅度
@@ -109,6 +110,25 @@ quick_scorer:
     - 日常
     - 娱乐
 
+# ── 阶段 2: 评论采样策略 ──
+# 轻量评论采样用于 QuickIntentScanner 快速判断视频是否有商业意图
+# 不同策略在误杀率/API调用次数/耗时之间存在权衡
+# 详细对比见 experiment_sampling.py
+comment_sampling:
+  strategy: first_n                 # first_n | top_and_latest | pool_random | random_from_N
+  sample_count: 8                   # 采样评论数 (8-12 推荐)
+  pool_size: 30                     # pool_random/random_from_N 策略的池大小
+  # 策略说明:
+  #   first_n:        前N条hot评论 — 最简单, ~1.5s, 1次API, 可能偏向泛评论
+  #   top_and_latest: Top(N/2) + 更深分页(N/2) — ~2s, 2次API, 覆盖更多时间层
+  #   pool_random:    前M条池中随机N条 — ~1.8s, 1次API, 降低hot偏差
+  #   random_from_N:  同上, pool_size=N — 等价N条随机
+
+# ════════════════════════════════════════════════════════════
+# ⚠️ 以下配置已被新管道 (v2.0) 替代, 不再生效
+# 保留用于参考, 修改不会影响系统行为
+# ════════════════════════════════════════════════════════════
+
 # ── P0: 视频预筛选 (DEPRECATED — 由 QuickScorer 替代) ──
 video_prefilter:
   enabled: true                  # 是否启用视频预筛选
@@ -116,7 +136,7 @@ video_prefilter:
   min_comments: 1                # 最低评论数（=0 直接丢弃，无评论无法进行意图识别）
   min_plays: 100                 # 最低播放量（0=不过滤）
 
-# ── P0: 账号过滤 ──
+# ── P0: 账号过滤 (DEPRECATED — 由 QuickScore 阶段1 替代) ──
 account_filter:
   enabled: false                 # 默认关闭，避免误杀有用账号
   min_followers: 0               # 最低粉丝数（0=不过滤）
@@ -139,7 +159,7 @@ account_filter:
   nickname_blacklist: []         # 昵称含这些词则排除
   username_blacklist: []         # 用户名含这些词则排除
 
-# ── P1: 账号评分 ──
+# ── P1: 账号评分 (DEPRECATED — 由 FinalScore 账号聚合替代) ──
 account_scorer:
   enabled: true
   weight_followers: 0.30         # 粉丝数权重
@@ -160,7 +180,7 @@ account_scorer:
 video_scraping:
   enrich_top: 20                 # 对点赞 Top N 条视频进入详情页补充精确互动数据（0=跳过）
 
-# ── P3: 视频过滤 ──
+# ── P3: 视频过滤 (DEPRECATED — 由 QuickScore 阶段1 替代) ──
 video_filter:
   enabled: false                 # 默认关闭
   min_plays: 0
@@ -177,7 +197,7 @@ video_filter:
   min_duration: 0
   max_duration: 0
 
-# ── P3: 视频评分 ──
+# ── P3: 视频评分 (DEPRECATED — 由 QuickScore + FinalScore 替代) ──
 video_scorer:
   enabled: true
   weight_plays: 0.20             # 播放量
@@ -193,7 +213,7 @@ video_scorer:
   min_description_length: 20
   optimal_duration_range: [15, 60]
 
-# ── 爆款视频发现 ──
+# ── 爆款视频发现 (DEPRECATED — 由统一评分视频质量维度覆盖) ──
 viral_detector:
   enabled: true
   viral_score_threshold: 60.0       # VideoScorer 评分 >= 此值视为爆款候选
@@ -205,7 +225,7 @@ viral_detector:
   tag_frequency_top_n: 20           # 高频标签取前 N
   engagement_benchmark_percentiles: [25, 50, 75]  # 互动率分位数
 
-# ── P5: 外贸采购意图检测 ──
+# ── P5: 外贸采购意图检测 (DEPRECATED — 由 QuickIntentScanner + CommentClassifier 替代) ──
 intent_detector:
   enabled: true
   min_confidence: 0.3
@@ -221,7 +241,7 @@ intent_detector:
     - shipping_request
   custom_keywords: {}            # 用户自定义关键词，如 {"price_inquiry": ["how much per unit", "unit cost"]}
 
-# ── 对标参考视频评分 ──
+# ── 对标参考视频评分 (DEPRECATED — 由 FinalScorer 阶段4 替代) ──
 reference_video_scorer:
   enabled: true
   weight_video_engagement: 0.25     # 视频互动质量（复用 VideoScorer 得分）

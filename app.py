@@ -272,6 +272,12 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
 
         emit("开始采集数据...")
         enrich_top = cfg.get("video_scraping", {}).get("enrich_top", 0)
+
+        # ── 阶段 2 评论采样配置 ──
+        sampling_cfg = cfg.get("comment_sampling", {})
+        sample_comment_count = sampling_cfg.get("sample_count", 8)
+        comment_sampling_strategy = sampling_cfg.get("strategy", "first_n")
+
         scraped_data = loop.run_until_complete(scraper.run_analysis(
             keywords=keywords, region=region,
             accounts_per_keyword=accounts_per_keyword,
@@ -279,6 +285,8 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
             comments_per_video=comments_per_video,
             comments_video_count=3,
             enrich_top=enrich_top,
+            sample_comment_count=sample_comment_count,
+            comment_sampling_strategy=comment_sampling_strategy,
         ))
 
         _active_tasks[task_id]["scraped_data"] = scraped_data

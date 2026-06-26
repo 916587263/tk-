@@ -9,3 +9,27 @@
           
 最新改动：现在可以爬取评论区了添加了账号评分系统，可以进一步有效的筛选账号；然后为了省token，打开claude是让他阅读 PROJECT_INDEX.md 后继续工作。
 最新问题：最后的报告不够好是.md文件不方便阅读，反正就是最后结果呈现方式不好，以后再做改进。
+
+## 快速开始
+
+1. 安装依赖: `pip install flask pyyaml openai playwright && playwright install chromium`
+2. (推荐) 手动登录 TikTok → 开启 Edge/Chrome 远程调试端口 9222
+3. 启动: `python app.py`
+4. 访问: http://127.0.0.1:5000
+5. 输入关键词, 填写 CDP 端口 (如 9222) → 开始分析
+
+## 配置
+
+所有参数在 `config.yaml` 中调整, 支持热加载。关键配置节:
+- `quick_scorer` — 阶段 1 快速评分 + 低互动降权
+- `comment_sampling` — 阶段 2 评论采样策略
+- `comment_classifier` — 阶段 3 LLM 评论分类
+- `final_scorer` — 阶段 4 终极评分
+- `keyword_expansion` — 关键词扩展
+
+完整配置模板见 `config.example.yaml`。
+
+## 项目文档
+
+- 架构详情: `PROJECT_INDEX.md`
+- 待办事项: `TODO.md`

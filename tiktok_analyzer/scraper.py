@@ -1481,7 +1481,7 @@ class TikTokScraper:
         # ── 方法 1: page.evaluate() 异步 fetch ──
         try:
             result = await self._page.evaluate("""
-                async (videoId, count) => {
+                async ({videoId, count}) => {
                     try {
                         const url = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=${count}&cursor=0`;
                         const res = await fetch(url);
@@ -1500,7 +1500,7 @@ class TikTokScraper:
                         return {error: e.message || String(e)};
                     }
                 }
-            """, video_id, count)
+            """, {"videoId": video_id, "count": count})
 
             if isinstance(result, dict) and "error" in result:
                 logger.warning(
@@ -1579,7 +1579,7 @@ class TikTokScraper:
         half = max(1, count // 2)
         try:
             result = await self._page.evaluate("""
-                async (videoId, count, half) => {
+                async ({videoId, count, half}) => {
                     try {
                         const base = 'https://www.tiktok.com/api/comment/list/'
                                    + '?aid=1988&aweme_id=' + videoId;
@@ -1600,7 +1600,7 @@ class TikTokScraper:
                         return {ok: true, comments: [...top, ...later]};
                     } catch(e) { return {error: e.message || String(e)}; }
                 }
-            """, video_id, count, half)
+            """, {"videoId": video_id, "count": count, "half": half})
             if isinstance(result, dict) and result.get("ok"):
                 comments = result.get("comments", [])
                 logger.info(
@@ -1648,7 +1648,7 @@ class TikTokScraper:
         pool = []
         try:
             result = await self._page.evaluate("""
-                async (videoId, poolSize) => {
+                async ({videoId, poolSize}) => {
                     try {
                         const url = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=${poolSize}&cursor=0`;
                         const res = await fetch(url);
@@ -1667,7 +1667,7 @@ class TikTokScraper:
                         return {error: e.message || String(e)};
                     }
                 }
-            """, video_id, pool_size)
+            """, {"videoId": video_id, "poolSize": pool_size})
 
             if isinstance(result, dict) and "error" in result:
                 logger.warning(
@@ -2413,6 +2413,35 @@ class TikTokScraper:
                 quick_scanner.has_intent(sample) if sample else False
             )
 
+            # —— 增强诊断: 采样评论原文 + 逐条匹配详情 ——
+            if sample:
+                logger.info("[阶段2诊断] vid=%s 采样评论原文 (前5条):", vid)
+                for ci, sc in enumerate(sample[:5]):
+                    logger.info("  [%d] text=%r", ci + 1, sc.get("text", "")[:120])
+            else:
+                logger.warning("[阶段2诊断] vid=%s ** 采样返回 0 条评论 **", vid)
+
+            # 逐条匹配诊断 (对前3条评论 + has_intent=False的视频做全量)
+            _check_depth = 3 if quick_scanner.has_intent(sample) else len(sample) if sample else 0
+            if sample and _check_depth > 0:
+                logger.info("[阶段2诊断] vid=%s 逐条匹配:", vid)
+                for ci, sc in enumerate(sample[:_check_depth]):
+                    text = sc.get("text", "")
+                    if not text:
+                        logger.info("  [%d] (empty text)", ci + 1)
+                        continue
+                    # 对每条评论检查所有 compiled patterns
+                    matched_list = []
+                    for name, patterns in quick_scanner._compiled.items():
+                        for pat in patterns:
+                            if pat.search(text):
+                                matched_list.append(f"{name}:{pat.pattern[:50]}")
+                                break  # 每个 category 只计一次
+                    if matched_list:
+                        logger.info("  [%d] text=%r -> HIT: %s", ci + 1, text[:100], "; ".join(matched_list))
+                    else:
+                        logger.info("  [%d] text=%r -> MISS (no pattern matched)", ci + 1, text[:100])
+
             v["_sampled_comments"] = sample
             _stage2_total_comments += len(sample)
             _stage2_total_videos += 1
@@ -2444,6 +2473,46 @@ class TikTokScraper:
             _stage2_total_videos, _stage2_total_comments, _stage2_avg,
             len(intent_signaled), len(no_intent)
         )
+        # —— 增强诊断: 全局汇总 ——
+        if _stage2_total_comments == 0:
+            logger.error(
+                "[阶段2诊断-汇总] ** 根本原因: 所有 %d 个视频的评论抓取均返回 0 条 **\n"
+                "  请检查:\n"
+                "  1) TikTok API /api/comment/list/ 是否变更了鉴权方式\n"
+                "  2) CDP 页面是否在 tiktok.com 域名下\n"
+                "  3) 日志中是否存在 'page.evaluate 异常' 或 'HTTP' 错误\n"
+                "  4) 浏览器是否已登录 TikTok",
+                _stage2_total_videos
+            )
+        else:
+            # 统计所有采样评论中高频出现的词，辅助判断关键词覆盖
+            from collections import Counter
+            _word_freq = Counter()
+            _total_non_empty = 0
+            for v in no_intent:
+                for c in v.get("_sampled_comments", []):
+                    t = (c.get("text", "") or "").strip().lower()
+                    if t:
+                        _total_non_empty += 1
+                        for word in t.split():
+                            word = word.strip(".,!?;:\"'()[]{}@#$%^&*+=<>/\\|~`")
+                            if len(word) >= 3:
+                                _word_freq[word] += 1
+            logger.info(
+                "[阶段2诊断-汇总] 采样评论总数=%d 非空评论=%d 有意图视频=%d/无意图=%d",
+                _stage2_total_comments, _total_non_empty,
+                len(intent_signaled), len(no_intent)
+            )
+            if _total_non_empty > 0:
+                logger.info(
+                    "[阶段2诊断-汇总] no_intent 视频评论高频词 (Top 30): %s",
+                    ", ".join(f"{w}({c})" for w, c in _word_freq.most_common(30))
+                )
+            else:
+                logger.warning(
+                    "[阶段2诊断-汇总] ** 所有采样评论 text 均为空 ** — "
+                    "检查 TikTok API 返回的 comment.text 字段是否变更"
+                )
         if _stage2_total_videos > 0 and _stage2_total_comments == 0:
             logger.error(
                 "[阶段2异常] %d 个视频全部 0 评论！请检查: "

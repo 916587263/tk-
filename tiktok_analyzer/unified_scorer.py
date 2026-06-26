@@ -34,7 +34,8 @@ class QuickScorerConfig:
 
     # ── 淘汰阈值 ──
     min_score: float = 20.0          # 低于此分直接淘汰
-    min_likes_no_comment: int = 5    # 无评论时最低点赞数
+    min_likes_no_comment: int = 5    # 点赞<此值 AND 评论=0 → 触发降权 (非硬淘汰)
+    low_engagement_multiplier: float = 0.60  # 低互动视频降权系数 (0=硬淘汰, 1=不降权)
 
     # ── 视频质量基准 ──
     play_benchmark: int = 100000     # 播放量基准 (50分参考线)
@@ -176,11 +177,9 @@ class QuickScorer:
         # ── 商业白名单检查 (在硬淘汰之前) ──
         whitelist_hit = self._check_commercial_whitelist(video, account)
 
-        eliminated = self._check_hard_elimination(video, account)
-        if eliminated:
-            # 如果硬淘汰被触发但白名单也命中, 理论上不会到这里
-            # (因为 _check_hard_elimination 内部已检查白名单),
-            # 但为安全起见仍记录白名单信息
+        eliminated, apply_penalty = self._check_hard_elimination(video, account)
+        if eliminated is not None:
+            # 硬淘汰 (zero_engagement): 零互动视频, 无任何信号可评估
             eliminated.commercial_whitelist_hit = whitelist_hit
             return eliminated
 
@@ -193,6 +192,11 @@ class QuickScorer:
             relevance = max(0, relevance * 0.5)
 
         total = self._w_rel * relevance + self._w_qual * quality
+
+        # ── 低互动降权: 零评论 + 低点赞, 但有足够产品信号值得保留 ──
+        if apply_penalty:
+            total = total * self.config.low_engagement_multiplier
+
         passed = total >= self.config.min_score
         eliminated_reason = "" if passed else f"quick_score {total:.1f} < {self.config.min_score}"
 
@@ -212,6 +216,7 @@ class QuickScorer:
                 "weight_relevance": round(self._w_rel, 2),
                 "weight_quality": round(self._w_qual, 2),
                 "personal_penalty": is_personal,
+                "low_engagement_penalty": apply_penalty,
             },
         )
 
@@ -237,25 +242,30 @@ class QuickScorer:
                 eliminated.append(v)
         return passed, eliminated
 
-    def _check_hard_elimination(self, video: dict, account: dict) -> Optional[QuickScoreResult]:
-        """检查硬淘汰条件 — 商业白名单可跳过硬淘汰"""
+    def _check_hard_elimination(self, video: dict, account: dict) -> tuple:
+        """检查硬淘汰条件 — 商业白名单可跳过硬淘汰
+
+        Returns:
+            (Optional[QuickScoreResult], apply_low_engagement_penalty: bool)
+            - QuickScoreResult 非 None → 硬淘汰 (zero_engagement)
+            - apply_low_engagement_penalty=True → 降权不淘汰 (低互动但有评分价值)
+            - (None, False) → 正常评分
+        """
         likes = video.get("digg_count", 0) or 0
         comments = video.get("comment_count", 0) or 0
         plays = video.get("play_count", 0) or 0
 
-        # ── 商业白名单通道: 命中 ≥N 个不同商业词 → 跳过硬淘汰 ──
+        # ── 商业白名单通道: 命中 ≥N 个不同商业词 → 跳过硬淘汰 + 不降权 ──
         if self._check_commercial_whitelist(video, account):
-            return None
+            return None, False
 
         if plays == 0 and likes == 0 and comments == 0:
-            return QuickScoreResult(total=0, passed=False, eliminated_reason="zero_engagement")
+            return QuickScoreResult(total=0, passed=False, eliminated_reason="zero_engagement"), False
 
         if likes < self.config.min_likes_no_comment and comments == 0:
-            return QuickScoreResult(
-                total=0, passed=False,
-                eliminated_reason=f"low_engagement: likes({likes}) < {self.config.min_likes_no_comment} AND comments=0"
-            )
-        return None
+            return None, True  # 降权不淘汰
+
+        return None, False
 
     def _check_commercial_whitelist(self, video: dict, account: dict) -> bool:
         """检测视频是否命中商业白名单 (desc/title/bio/nickname 含 ≥N 个不同商业词)

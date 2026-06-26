@@ -160,7 +160,115 @@ final_score = sigmoid(raw, center=50, steepness=15)
 10. 关键词扩展优化 — LLM驱动 + 聚类去重 + 搜索价值评分 (暂停)
 11. ✅ 管道级集成测试 — tests/test_pipeline_e2e.py: 16 tests/68 assertions, 覆盖 QuickScore→QuickIntent→Classify→FinalScore (2026-06-24)
 12. 历史对比/趋势追踪 — 无法对比多次分析结果 (暂停)
-13. 🔧 高价值误杀率优化 — 部分修复: industry_keywords 同步白名单 5 词 + personal_patterns 移除 daily, 误杀从 5/8 降至 1/8. 剩余: min_likes_no_comment=5 硬淘汰阈值仍过严 (2026-06-24)
+13. ✅ 高价值误杀率优化 — 硬淘汰 → 降权 (low_engagement_multiplier=0.60), 商业白名单跳过降权, 误杀从 5/8 降至 0.5/8 (2026-06-26)
+
+## API 路由
+
+| 路由 | 方法 | 关键参数 | 功能 |
+|------|------|----------|------|
+| `/` | GET | — | Web 管理界面 (index.html) |
+| `/api/start` | POST | keywords, region, cdp_port, expand_tier, ... | 启动分析任务 → {task_id, status} |
+| `/api/stop/<task_id>` | POST | — | 停止运行中的任务 (跨线程通知 scraper) |
+| `/api/expand` | POST | keywords, tier | 预览关键词扩展结果 → {keywords, breakdown} |
+| `/api/progress/<task_id>` | GET | — | SSE 实时进度推送 (30s heartbeat) |
+| `/api/status/<task_id>` | GET | — | 任务状态查询 → {status, keywords, region} |
+| `/api/results/<task_id>` | GET | — | 结果摘要 JSON (含 reference_videos + analysis) |
+| `/api/download/<task_id>/<file_type>` | GET | file_type=report\|accounts\|videos\|comments\|reference_videos | 文件下载 |
+
+## 部署依赖
+
+### 必需
+- **Python** 3.9+ (asyncio, dataclasses)
+- **Playwright** + Chromium: `pip install playwright && playwright install chromium`
+- **Python 包**: Flask, PyYAML, openai (SDK)
+
+### 可选
+- **MS Edge / Chrome** — CDP 模式 (推荐, 端口 9222): 手动登录 TikTok 后连接已有浏览器, 绕过反爬
+- **DeepSeek API Key** 或 **OpenAI API Key** — LLM 增强 (阶段 3 评论分类 + 阶段 5 AI 分析)
+- **proxies.json** — 代理配置 (格式见 `proxies.example.json`)
+
+### 浏览器模式
+- **CDP 模式 (推荐)**: 开启 Edge/Chrome 远程调试端口 9222 → Web UI 填写 cdp_port → 连接已有登录态浏览器
+- **独立模式 (fallback)**: `browser_profile/` 目录持久化 Cookie，反爬检测较严格
+
+## 数据目录
+
+```
+data/
+├── {YYYYMMDD_HHMMSS}/              # 每次任务输出
+│   ├── accounts.csv                 # 账号列表
+│   ├── videos.csv                   # 视频列表
+│   ├── comments.csv                 # 评论列表
+│   ├── reference_videos.csv         # Top 20 对标参考视频
+│   └── report.md                    # Markdown 报告
+├── debug/                           # 调试数据
+├── experiment_{ts}/                 # experiment_sampling.py 输出
+├── validate_{ts}/                   # validate_pipeline.py 输出 (含 validation_report.md)
+└── verify_qi_{ts}/                  # verify_quickintent.py 输出
+
+checkpoints/{task_id}.db             # 断点续爬 SQLite (进度 + 已抓取标记)
+cache/keyword_cache.json             # 关键词扩展结果缓存 (TTL 7天)
+cookies/tiktok_cookies.json          # 持久化登录态 Cookie
+logs/{YYYYMMDD_HHMMSS}.log           # 运行日志 (250+ 历史文件, 建议 P2 清理)
+```
+
+## 阶段 2: 评论采样策略
+
+当前默认: **first_n** (前 8 条 hot 排序评论)
+配置位置: `config.yaml → comment_sampling`
+代码入口: `scraper.run_analysis(comment_sampling_strategy="first_n", sample_comment_count=8)`
+
+### 策略对比
+
+| 策略 | API 次数 | 耗时 | 优点 | 缺点 |
+|------|----------|------|------|------|
+| `first_n` (默认) | 1 | ~1.5s | 最简单, 可靠 | hot 排序可能偏向泛评论 |
+| `top_and_latest` | 2 | ~2s | 覆盖新旧两层评论 | 多 1 次 API |
+| `pool_random` | 1 | ~1.8s | 降低 hot 偏差 | 池大小决定随机性 |
+| `random_from_N` | 1 | ~1.5s | 等同 N 条随机 | 池=采样数, 随机性有限 |
+
+详细对比实验见 `experiment_sampling.py`。
+
+## 设计决策 (Design Decisions)
+
+### DD-1: 漏斗式管道架构
+- **决策**: 采用 5 阶段逐级收窄的漏斗模型 (QuickScore → QuickIntent → LLM分类 → FinalScore → AI分析)
+- **原因**: LLM 调用成本高 (DeepSeek ~$0.14/1M input)，尽可能在前置阶段用规则引擎淘汰低价值视频，保护 LLM 预算
+- **代价**: 前置阶段可能存在误杀，需要持续监控和验证
+
+### DD-2: QuickScore 两维度设计
+- **决策**: 阶段 1 仅使用产品相关度(50%) + 视频质量(50%)，不使用评论数据
+- **原因**: 评论抓取需要网络请求 (~1.5s/视频)，在 500+ 视频规模下成本过高
+- **代价**: 零评论视频的产品相关度判断仅依赖 desc/tags/bio，可能漏掉隐含高价值的视频
+
+### DD-3: 低互动降权 (非硬淘汰)
+- **决策**: 零评论 + 低点赞视频不再硬淘汰，改为降权 (×0.60) 后进入正常评分
+- **原因**: B2B 工厂视频天然低互动但产品信号强，硬淘汰会误杀高价值内容 (Issue #13)
+- **安全阀**: 商业白名单命中 ≥2 词 → 跳过降权; multiplier=0 → 恢复旧版硬淘汰
+- **配置**: `config.yaml → quick_scorer.low_engagement_multiplier`
+
+### DD-4: 默认采样策略 (first_n)
+- **决策**: 阶段 2 默认使用前 8 条 hot 排序评论
+- **原因**: (a) 实现最简单; (b) 覆盖面可接受 (见 verify_quickintent.py); (c) 其他策略的增量收益与成本不匹配
+- **备选**: top_and_latest / pool_random / random_from_N
+- **配置**: `config.yaml → comment_sampling.strategy`
+
+### DD-5: 商业白名单优先于降权
+- **决策**: 在降权之前先判断白名单，命中 ≥2 词 → 不施加降权
+- **原因**: 纯互动指标在 B2B 垂类中信号不够强，商业关键词作为补充信号
+- **限制**: 白名单仅 10 个通用词 (manufacturer/factory/supplier/oem/odm/moq/wholesale/distributor/importer/exporter)，无法覆盖所有外贸细分品类
+
+### 已知限制
+
+| 限制 | 影响范围 | 缓解措施 | 状态 |
+|------|----------|----------|------|
+| 非 CDP 模式反爬检测严格 | 浏览器启动 | 推荐 CDP 模式连接已有浏览器 | 已知 |
+| 商业白名单仅 10 个通用词 | 阶段 1 逃生门 | industry_keywords 作为补充评分 | 已知 |
+| 采样 8 条可能漏检商业信号 | 阶段 2 | QuickIntentScanner 低阈值 (min_hits=1) | 已缓解 |
+| LLM 分类仅 enable_llm=true 时启用 | 阶段 3 | 规则引擎作为 fallback | 设计如此 |
+| 关键词硬上限 10 词 | 搜索广度 | 三级扩展 (compact/balanced/full) | 设计如此 |
+| data/ + logs/ 历史文件积累 | 磁盘空间 | 无自动清理 | P2 待做 |
+| experiment_sampling.py 基于模拟数据 | 结论可信度 | 需对接真实 scraper 数据 | P2 待做 |
 
 ## 修复记录 (2026-06-24)
 
@@ -191,7 +299,9 @@ final_score = sigmoid(raw, center=50, steepness=15)
 
 ## 配置热区
 
-- `config.yaml → quick_scorer` — QuickScore 权重/阈值 (阶段1)
+- `config.yaml → quick_scorer` — QuickScore 权重/阈值/降权系数 (阶段1)
+- `config.yaml → quick_scorer.low_engagement_multiplier` — 低互动降权系数 (0=硬淘汰, 1=不降权)
+- `config.yaml → comment_sampling` — 评论采样策略/数量 (阶段2)
 - `config.yaml → comment_classifier` — LLM评论分类配置 (阶段3)
 - `config.yaml → final_scorer` — FinalScore 三权重 (30/30/40) 和分级阈值 (阶段4)
 - `config.yaml → keyword_expansion.default_tier` — 扩展级别 (compact/balanced/full)

@@ -1,0 +1,135 @@
+# ============================================================
+# TikTok 外贸行业对标视频发现系统 — 配置参考 (v2.1)
+# 复制为 config.yaml 后修改即可生效，无需重启 Web 服务
+# ============================================================
+
+# ── LLM 总开关 ──
+# enable_llm=false 时使用纯规则引擎 (QuickIntentScanner), 零 API 成本
+# enable_llm=true  时启用 CommentClassifier + AI 分析增强
+enable_llm: false
+llm_provider: deepseek              # openai | deepseek | 兼容 OpenAI 协议的任意服务
+llm_model: deepseek-chat            # deepseek-chat | gpt-4o-mini | gpt-4o
+llm_base_url: https://api.deepseek.com/v1
+
+# ── 阶段 1: QuickScore 无评论快速评分 ──
+# 仅基于视频元数据 + 账号信息, 零评论依赖, 淘汰 ~70-80% 低价值视频
+quick_scorer:
+  enabled: true
+  weight_relevance: 0.50            # 产品相关度权重
+  weight_quality: 0.50              # 视频质量权重
+  min_score: 20.0                   # 低于此分直接淘汰
+  min_likes_no_comment: 5           # 点赞<此值 AND 评论=0 → 触发降权
+  low_engagement_multiplier: 0.60   # 降权系数 (0=硬淘汰, 1=不降权)
+  play_benchmark: 100000            # 播放量基准 (50分参考线)
+  engagement_benchmark: 0.05        # 互动率基准 (5%=50分)
+  personal_account_penalty: 30.0    # 个人/娱乐号降分幅度
+  # 商业白名单: 命中 ≥min_hits 个不同关键词 → 跳过降权
+  commercial_whitelist:
+    - manufacturer
+    - factory
+    - supplier
+    - oem
+    - odm
+    - moq
+    - wholesale
+    - distributor
+    - importer
+    - exporter
+  commercial_whitelist_min_hits: 2
+  # 行业关键词 (产品相关度计算)
+  industry_keywords:
+    - factory
+    - manufacturer
+    - supplier
+    - wholesale
+    - export
+    - factory direct
+    - oem
+    - odm
+    - moq
+    - manufacturing
+    - production
+    - distributor
+    - importer
+    - exporter
+    - 工厂
+    - 厂家
+    - 供应商
+    - 批发
+    - 外贸
+    - 生产
+    - 制造
+    - 出口
+  # 个人/娱乐账号检测词
+  personal_account_patterns:
+    - fan account
+    - fanpage
+    - fan page
+    - fandom
+    - stan
+    - updates
+    - vlog
+    - entertainment
+    - 粉丝
+    - 后援
+    - 日常
+    - 娱乐
+
+# ── 阶段 2: 评论采样策略 ──
+# 轻量评论采样用于 QuickIntentScanner 判断视频是否有商业意图
+comment_sampling:
+  strategy: first_n                 # first_n | top_and_latest | pool_random | random_from_N
+  sample_count: 8                   # 采样评论数 (8-12 推荐)
+  pool_size: 30                     # pool_random/random_from_N 策略的池大小
+
+# ── 阶段 3: 评论 LLM 分类 ──
+# 批量 LLM 调用, 对阶段 2 筛选出的视频进行深度评论意图分类
+comment_classifier:
+  enabled: true
+  videos_per_batch: 6
+  max_comments_per_video: 40
+  model: gpt-4o-mini
+  temperature: 0.1
+  # 后分类轻量淘汰
+  intent_filter_enabled: true
+  intent_filter_min_ratio: 0.03
+  intent_filter_min_actionable: 1
+
+# ── 阶段 4: FinalScore 终极统一评分 ──
+# 三权重: 产品相关度(30%) + 视频质量(30%) + 商业意图(40%)
+final_scorer:
+  enabled: true
+  weight_product: 0.30
+  weight_quality: 0.30
+  weight_intent: 0.40
+  intent_sub_ratio: 0.4
+  intent_sub_quality: 0.4
+  intent_sub_diversity: 0.2
+  tier_thresholds:
+    S: 80
+    A: 60
+    B: 40
+    C: 20
+  top_reference_n: 20
+
+# ── 关键词扩展 ──
+# 三级扩展策略: compact(快速验证) / balanced(日常生产) / full(深度挖掘)
+keyword_expansion:
+  default_tier: balanced
+  cache_ttl_days: 7
+  max_keywords_per_tier:
+    compact: 5
+    balanced: 16
+    full: 45
+
+# ── 视频深度抓取 ──
+video_scraping:
+  enrich_top: 20                    # 对点赞 Top N 条视频补充精确互动数据
+
+# ── AI 分析增强 (阶段 5) ──
+ai_analysis:
+  use_scored_data: true
+  use_intent_data: true
+  max_accounts_in_prompt: 20
+  max_videos_in_prompt: 30
+  max_comments_in_prompt: 200
