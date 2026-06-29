@@ -126,7 +126,7 @@
             <div class="card">
                 <div class="stats-grid" id="statsGrid">
                     <div class="stat-card"><div class="value" id="statReference">-</div><div class="label">🎯 对标参考视频</div></div>
-                    <div class="stat-card"><div class="value" id="statHighGrade">-</div><div class="label">⭐ S/A 级参考</div></div>
+                    <div class="stat-card"><div class="value" id="statHighGrade">-</div><div class="label">⭐ S/A 级对标视频</div></div>
                     <div class="stat-card"><div class="value" id="statIntentComments">-</div><div class="label">💬 含采购意向评论</div></div>
                     <div class="stat-card"><div class="value" id="statIntentTypes">-</div><div class="label">🏷 涉及意图类别</div></div>
                 </div>
@@ -141,8 +141,8 @@
             <!-- 详情标签 -->
             <div class="card">
                 <div class="tabs">
-                    <button class="tab-btn active" onclick="switchTab('reference')">🎯 对标参考</button>
-                    <button class="tab-btn" onclick="switchTab('videos')">🔥 视频排行</button>
+                    <button class="tab-btn active" onclick="switchTab('reference')">🎯 对标参考视频</button>
+                    <button class="tab-btn" onclick="switchTab('videos')">📋 全部通过视频</button>
                     <button class="tab-btn" onclick="switchTab('analysis')">🤖 AI 分析</button>
                 </div>
 
@@ -450,42 +450,43 @@
                 sample_request: '样品', wholesale_request: '批发', shipping_request: '物流'
             };
 
-            let html = '<thead><tr><th>#</th><th>参考分</th><th>等级</th><th>账号</th><th>视频描述</th><th>采购意向比</th><th>意向类型</th><th>👍</th><th>💬</th></tr></thead><tbody>';
+            let html = '<thead><tr><th>#</th><th>视频描述</th><th>▶ 播放</th><th>👍 点赞</th><th>💬 评论</th><th>🔄 分享</th><th>采购意向</th><th>FinalScore</th><th>等级</th><th>账号</th></tr></thead><tbody>';
 
             refs.forEach((v, i) => {
-                const score = v.reference_score || 0;
-                const tier = v.reference_tier || 'D';
-                const tierLabel = v.reference_tier_label || '';
+                const score = v.final_score || v.reference_score || 0;
+                const tier = v.tier || v.reference_tier || 'D';
+                const tierLabel = v.tier_label || v.reference_tier_label || '';
                 const uname = v.account_username || '';
-                const desc = (v.desc || '无描述').substring(0, 60);
-                const intentRatio = v.purchase_intent_ratio || 0;
-                const intentPct = Math.round(intentRatio * 100);
-                const intentCount = v.purchase_intent_comments || 0;
-                const totalComments = v.comment_count || 0;
+                const desc = (v.desc || '无描述').substring(0, 80);
+                const playCount = v.play_count || 0;
                 const digg = v.digg_count || 0;
-
-                // 提取该视频的意图类型
-                const vComments = []; // 无法从前端获取，用 breakdown 或留空
-                // 实际意图类型从 top_intent 字段推断（评论级数据不在此 API 返回）
-                // 这里展示参考分 breakdown 中的信息
-                const breakdown = v.reference_breakdown || {};
+                const commentCount = v.comment_count || 0;
+                const shareCount = v.share_count || 0;
+                const intentRatio = v.purchase_intent_ratio || v.intent_ratio || 0;
+                const intentPct = Math.round(intentRatio * 100);
+                const intentCount = v.purchase_intent_comments || v.actionable_intent_count || 0;
+                const totalComments = v.comment_count || 0;
+                const videoUrl = v.url || ('https://www.tiktok.com/@' + uname + '/video/' + (v.id || ''));
 
                 // 意图比颜色条
                 const barColor = intentPct >= 20 ? 'var(--green)' : intentPct >= 10 ? 'var(--orange)' : 'var(--text-dim)';
 
                 html += '<tr>' +
                     '<td class="rank">' + (i + 1) + '</td>' +
-                    '<td class="score-cell">' + score + '</td>' +
-                    '<td><span class="tier-badge tier-' + tier + '">' + tier + '</span></td>' +
-                    '<td><a href="https://tiktok.com/@' + uname + '" target="_blank" class="user-link">@' + uname + '</a></td>' +
-                    '<td class="desc-cell" title="' + escapeHtml(v.desc || '') + '">' + escapeHtml(desc) + '</td>' +
+                    '<td class="desc-cell" title="' + escapeHtml(v.desc || '') + '">' +
+                        '<a href="' + videoUrl + '" target="_blank" class="video-link" title="在 TikTok 打开">' + escapeHtml(desc) + '</a>' +
+                    '</td>' +
+                    '<td class="count-badge">' + fmtNum(playCount) + '</td>' +
+                    '<td class="count-badge high">' + fmtNum(digg) + '</td>' +
+                    '<td class="count-badge">' + fmtNum(commentCount) + '</td>' +
+                    '<td class="count-badge">' + fmtNum(shareCount) + '</td>' +
                     '<td class="intent-cell">' +
                         '<div class="intent-mini-bar"><div class="intent-mini-fill" style="width:' + intentPct + '%;background:' + barColor + '"></div></div>' +
                         '<span class="intent-ratio-text">' + intentCount + '/' + totalComments + ' (' + intentPct + '%)</span>' +
                     '</td>' +
-                    '<td class="intent-types-cell">-</td>' +
-                    '<td class="count-badge high">' + fmtNum(digg) + '</td>' +
-                    '<td class="count-badge">' + fmtNum(totalComments) + '</td>' +
+                    '<td class="score-cell">' + (score || '-') + '</td>' +
+                    '<td><span class="tier-badge tier-' + tier + '">' + tier + '</span></td>' +
+                    '<td><a href="https://tiktok.com/@' + uname + '" target="_blank" class="user-link">@' + uname + '</a></td>' +
                     '</tr>';
             });
 
@@ -496,22 +497,30 @@
         // ═══════════════ 视频排行标签 ═══════════════
         function renderVideosTab(data) {
             const videos = data.videos || [];
-            let html = '<thead><tr><th>#</th><th>账号</th><th>描述</th><th>标签</th><th>视频评分</th><th>👍 点赞</th><th>💬 评论</th><th>🔄 分享</th><th>▶ 播放</th></tr></thead><tbody>';
+            let html = '<thead><tr><th>#</th><th>视频描述</th><th>▶ 播放</th><th>👍 点赞</th><th>💬 评论</th><th>🔄 分享</th><th>标签</th><th>采购意向</th><th>FinalScore</th><th>等级</th><th>账号</th></tr></thead><tbody>';
 
             videos.forEach((v, i) => {
                 const tags = (v.tags || []).slice(0, 4).map(t => '<span class="tag-badge">#' + t + '</span>').join(' ');
-                const score = v.score || 0;
+                const score = v.final_score || v.score || 0;
                 const tier = v.tier || 'D';
+                const uname = v.account_username || '';
+                const videoUrl = v.url || ('https://www.tiktok.com/@' + uname + '/video/' + (v.id || ''));
+                const intentRatio = v.purchase_intent_ratio || v.intent_ratio || 0;
+                const intentPct = Math.round(intentRatio * 100);
                 html += '<tr>' +
                     '<td class="rank">' + (i + 1) + '</td>' +
-                    '<td>@' + (v.account_username || '') + '</td>' +
-                    '<td class="desc-cell" title="' + escapeHtml(v.desc || '') + '">' + escapeHtml((v.desc || '').substring(0, 50)) + '</td>' +
-                    '<td class="tags-cell">' + tags + '</td>' +
-                    '<td><span class="tier-badge tier-' + tier + '">' + (v.tier_label || tier) + ' ' + (score || 0) + '</span></td>' +
+                    '<td class="desc-cell" title="' + escapeHtml(v.desc || '') + '">' +
+                        '<a href="' + videoUrl + '" target="_blank" class="video-link" title="在 TikTok 打开">' + escapeHtml((v.desc || '').substring(0, 80)) + '</a>' +
+                    '</td>' +
+                    '<td class="count-badge">' + fmtNum(v.play_count) + '</td>' +
                     '<td class="count-badge high">' + fmtNum(v.digg_count) + '</td>' +
                     '<td class="count-badge">' + fmtNum(v.comment_count) + '</td>' +
                     '<td class="count-badge">' + fmtNum(v.share_count) + '</td>' +
-                    '<td class="count-badge">' + fmtNum(v.play_count) + '</td>' +
+                    '<td class="tags-cell">' + (tags || '-') + '</td>' +
+                    '<td class="count-badge">' + intentPct + '%</td>' +
+                    '<td class="score-cell">' + (score || '-') + '</td>' +
+                    '<td><span class="tier-badge tier-' + tier + '">' + (v.tier_label || tier) + '</span></td>' +
+                    '<td><a href="https://tiktok.com/@' + uname + '" target="_blank" class="user-link">@' + uname + '</a></td>' +
                     '</tr>';
             });
             html += '</tbody>';

@@ -448,12 +448,14 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
             if top_references:
                 summaries = []
                 for i, v in enumerate(top_references[:5]):
+                    desc = (v.get('desc') or '')[:60]
                     summaries.append(
-                        f"#{i+1} @{v.get('account_username','')}: "
-                        f"final={v.get('final_score',0):.0f} "
-                        f"(意图={v.get('commercial_intent',0):.0f})"
+                        f"#{i+1} \"{desc}\" "
+                        f"(FinalScore={v.get('final_score',0):.0f}, "
+                        f"意图={v.get('commercial_intent',0):.0f}, "
+                        f"@{v.get('account_username','')})"
                     )
-                emit(f"  对标 Top 5: {' | '.join(summaries)}")
+                emit(f"  🎯 对标视频 Top 5: {' | '.join(summaries)}")
 
             for v in top_references:
                 vid = v.get("id", "")
@@ -559,9 +561,10 @@ def _run_analysis(task_id, keywords, region, accounts_per_keyword,
             "csv_files": {k: str(v) for k, v in csv_files.items()},
             "md_file": str(md_file),
             "summary": {
-                "accounts": scraped_data.get("total_accounts", 0),
                 "videos": scraped_data.get("total_videos", 0),
+                "deep_analyzed": len(scraped_data.get("deep_analyzed_videos", [])),
                 "comments": scraped_data.get("total_comments", 0),
+                "accounts": scraped_data.get("total_accounts", 0),
             }
         })
 
@@ -671,24 +674,28 @@ def task_results(task_id):
             "by_category": s.get("by_category", {}),
         }
 
+    # 视频排行: 优先展示 deep_analyzed_videos（有深度意图评分），其次全部通过视频
+    all_scored_videos = scraped.get("deep_analyzed_videos", scraped.get("videos", []))
+    ranked_videos = sorted(
+        all_scored_videos,
+        key=lambda x: _safe_num(x.get("final_score", x.get("quick_score", 0)) or 0),
+        reverse=True
+    )[:20]
+
     return jsonify({
         "summary": {
-            "accounts": scraped.get("total_accounts", 0),
             "videos": scraped.get("total_videos", 0),
-            "comments": scraped.get("total_comments", 0),
             "deep_analyzed": scraped.get("intent_signaled_count",
                                          len(scraped.get("deep_analyzed_videos", []))),
+            "comments": scraped.get("total_comments", 0),
+            "accounts": scraped.get("total_accounts", 0),
             "quick_score_stats": scraped.get("quick_score_stats", {}),
         },
         "reference_videos": ref_data.get("top_reference_videos", []),
         "reference_benchmarks": ref_data.get("reference_benchmarks", {}),
         "intent_summary": intent_summary,
+        "videos": ranked_videos,
         "accounts": scraped.get("accounts", [])[:10],
-        "videos": sorted(
-            scraped.get("deep_analyzed_videos", scraped.get("videos", [])),
-            key=lambda x: _safe_num(x.get("final_score", x.get("quick_score", 0)) or 0),
-            reverse=True
-        )[:20],
         "analysis": analysis,
     })
 

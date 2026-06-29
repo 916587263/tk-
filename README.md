@@ -39,28 +39,19 @@ playwright install chromium
 
 ---
 
-## Chrome CDP 启动方式（推荐）
+## Chrome CDP 启动方式
 
-直接通过 Playwright 启动浏览器极易被 TikTok 检测。**CDP 模式**使用你已经登录 TikTok 的真实浏览器，绕过所有反爬机制。
+> **使用 Launcher（推荐）**：`python launcher.py` 会自动处理以下所有步骤，无需手动操作。
+
+如果你需要手动控制浏览器，使用以下步骤：
 
 ### 步骤
-
 1. **完全关闭**所有 Edge / Chrome 窗口
-2. 在终端运行：
-
-   **Edge**:
-   ```bash
-   "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
-   ```
-
-   **Chrome**:
-   ```bash
-   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
-   ```
-
+2. 在终端运行 Edge 或 Chrome 并开启 CDP 调试端口：
+   - **Edge**: `msedge --remote-debugging-port=9222`
+   - **Chrome**: `chrome --remote-debugging-port=9222`
 3. 在弹出的浏览器窗口中，打开 [https://www.tiktok.com](https://www.tiktok.com) 并**手动登录**
-4. 保持浏览器窗口打开，启动本项目
-5. 在 Web UI 中选择 **"CDP 连接 (端口 9222) — 推荐"**
+4. 启动本项目，在 Web UI 中选择 **"CDP 连接 (端口 9222) — 推荐"**
 
 ### 原理
 
@@ -115,11 +106,47 @@ FLASK_ENV=development                          # development=debug 模式 | prod
 
 ## 启动方式
 
-### Web 界面（推荐）
+### 一键启动（推荐 ✨）
+
+**Windows** — 双击 `start.bat` 或在终端运行:
 
 ```bash
-python app.py
+python launcher.py
 ```
+
+**macOS / Linux**:
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+Launcher 会自动完成:
+1. 检查 Python 版本 + 依赖 + 浏览器
+2. 自动启动/复用 Edge CDP (端口 9222)
+3. 启动 Flask Web 应用
+4. 打开浏览器访问界面
+
+> **无需手动操作浏览器！** Launcher 会创建独立的浏览器 Profile (`launcher_profile/`)，不干扰你的日常浏览器数据。
+
+**Launcher 配置** (可选):
+
+编辑 `config/launcher.yaml` 自定义启动行为（修改后下次启动生效）:
+```yaml
+browser:
+  preferred: edge        # edge | chrome | auto
+  debug_port: 9222       # CDP 端口
+  reuse_existing: true   # 复用已有 CDP 浏览器
+app:
+  port: 5000
+  open_browser: true     # 启动后自动打开浏览器
+logging:
+  console_level: INFO    # DEBUG | INFO | WARNING | ERROR
+```
+
+或使用环境变量: `LAUNCHER_DEBUG_PORT=9223 python launcher.py`
+
+### Web 界面
 
 浏览器访问 [http://127.0.0.1:5000](http://127.0.0.1:5000)
 
@@ -155,6 +182,13 @@ python tiktok_analyzer.py --keyword "non woven bag" --region US --cdp-port 9222 
 
 ```
 =tk/
+├── launcher.py                     # 一键启动器 ✨
+├── start.bat                       # Windows 双击启动
+├── start.sh                        # macOS/Linux 一键启动
+├── launcher/                       # 启动器子模块
+│   ├── env_check.py                # 环境检查
+│   ├── browser_manager.py          # CDP 浏览器管理
+│   └── app_runner.py               # Flask 进程管理
 ├── app.py                         # Flask Web 入口
 ├── tiktok_analyzer.py             # CLI 入口
 ├── config.yaml                    # 全局配置（不提交到 Git）
@@ -207,6 +241,13 @@ pip install pyyaml
 - 确认 Edge/Chrome 已完全关闭后重新从命令行启动
 - 确认端口号正确（默认 9222）
 - 系统会自动降级为普通模式，但反爬效果差
+
+### Launcher 启动失败
+- `未找到浏览器`: 安装 Microsoft Edge (https://www.microsoft.com/edge)
+- `DevTools 启动超时`: 检查是否有其他程序占用 9222 端口 (`netstat -ano | findstr 9222`)
+- `依赖缺失`: 执行 `pip install -r requirements.txt`
+- `找不到 Python`: 安装 Python 3.9+ (https://www.python.org/downloads/)
+- 如需手动启动: `python app.py` (需先手动启动 CDP 浏览器)
 
 ### 未设置 API Key 提示
 - 不影响核心功能。LLM 增强关闭时，系统使用规则引擎完成评分，只是阶段 3 和阶段 5 不执行 LLM 调用

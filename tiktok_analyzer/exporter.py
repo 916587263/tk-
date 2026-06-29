@@ -266,47 +266,41 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
     lines.append(f"")
     lines.append(f"| 指标 | 数量 |")
     lines.append(f"|------|------|")
-    lines.append(f"| 分析账号 | {scraped_data.get('total_accounts', 0)} |")
     lines.append(f"| 抓取视频 | {scraped_data.get('total_videos', 0)} |")
+    lines.append(f"| 深度分析视频 | {len(scraped_data.get('deep_analyzed_videos', []) or scraped_data.get('reference_videos', []))} |")
     lines.append(f"| 抓取评论 | {scraped_data.get('total_comments', 0)} |")
+    lines.append(f"| 涉及账号 | {scraped_data.get('total_accounts', 0)} |")
     lines.append(f"")
 
-    # 账号排名
-    lines.append(f"## 🏆 账号排行榜（按粉丝数）")
-    lines.append(f"")
-    has_scores = any(
-        a.get("reference_value") is not None or a.get("score") is not None
-        for a in scraped_data.get("accounts", [])
-    )
-    if has_scores:
-        lines.append(f"| 排名 | 账号 | 昵称 | 粉丝 | 点赞 | 商业价值分 | 参考视频数 | 简介 |")
-        lines.append(f"|------|------|------|------|------|------------|------------|------|")
-    else:
-        lines.append(f"| 排名 | 账号 | 昵称 | 粉丝 | 点赞 | 简介 |")
-        lines.append(f"|------|------|------|------|------|------|")
-    accounts_sorted = sorted(
-        scraped_data.get("accounts", []),
-        key=lambda x: _safe_num(x.get("reference_value", x.get("follower_count", 0))),
-        reverse=True
-    )
-    for i, a in enumerate(accounts_sorted[:20], 1):
-        if has_scores:
-            rv = a.get("reference_value", a.get("score", "-"))
-            rv_num = _safe_num(rv, -1)
+    # ── 对标参考视频 TOP N (核心产出，置于最前) ──
+    all_videos = scraped_data.get("videos", [])
+    reference_videos = scraped_data.get("reference_videos", [])
+    if not reference_videos:
+        reference_videos = sorted(
+            [v for v in all_videos if v.get("is_top_reference")],
+            key=lambda x: _safe_num(x.get("final_score", x.get("reference_score", 0))),
+            reverse=True
+        )
+    if reference_videos:
+        lines.append(f"## 🎯 对标参考视频 TOP {len(reference_videos)}")
+        lines.append(f"")
+        lines.append(f"> 通过 QuickScore + 商业意图验证的高参考价值视频，适合运营团队对标模仿。")
+        lines.append(f"")
+        lines.append(f"| 排名 | 视频描述 | 播放 | 点赞 | 评论 | FinalScore | 商业意图 | 采购意向占比 | 等级 | 账号 |")
+        lines.append(f"|------|------|------|------|------|-----------|----------|------------|------|------|")
+        for v in reference_videos:
+            desc = (v.get("desc") or "")[:50].replace("|", "/")
             lines.append(
-                f"| {i} | @{a.get('username', '')} | {a.get('nickname', '')} | "
-                f"{_fmt_count(a.get('follower_count', 0))} | {_fmt_count(a.get('like_count', 0))} | "
-                f"{rv}{'⭐' if rv_num > 60 else ''} | "
-                f"{a.get('reference_video_count', a.get('tier', ''))} | "
-                f"{a.get('bio', '')[:50]} |"
+                f"| {v.get('reference_rank', '')} | {desc} | "
+                f"{_fmt_count(v.get('play_count', 0))} | {_fmt_count(v.get('digg_count', 0))} | "
+                f"{_fmt_count(v.get('comment_count', 0))} | "
+                f"{v.get('final_score', v.get('reference_score', ''))} | "
+                f"{v.get('commercial_intent', '')} | "
+                f"{v.get('purchase_intent_ratio', 0):.1%} | "
+                f"{v.get('tier', v.get('reference_tier', ''))} | "
+                f"@{v.get('account_username', '')} |"
             )
-        else:
-            lines.append(
-                f"| {i} | @{a.get('username', '')} | {a.get('nickname', '')} | "
-                f"{_fmt_count(a.get('follower_count', 0))} | {_fmt_count(a.get('like_count', 0))} | "
-                f"{a.get('bio', '')[:50]} |"
-            )
-    lines.append(f"")
+        lines.append(f"")
 
     # 热门视频
     lines.append(f"## 🔥 热门视频 TOP 20")
@@ -327,34 +321,44 @@ def export_markdown(scraped_data: dict, analysis_data: Optional[dict] = None,
         )
     lines.append(f"")
 
-    # ── 对标参考视频 TOP N ──
-    all_videos = scraped_data.get("videos", [])
-    reference_videos = scraped_data.get("reference_videos", [])
-    if not reference_videos:
-        reference_videos = sorted(
-            [v for v in all_videos if v.get("is_top_reference")],
-            key=lambda x: _safe_num(x.get("final_score", x.get("reference_score", 0))),
-            reverse=True
-        )
-    if reference_videos:
-        lines.append(f"## 🎯 对标参考视频 TOP {len(reference_videos)}")
-        lines.append(f"")
-        lines.append(f"> 通过 QuickScore + 商业意图验证的高参考价值视频，适合运营团队对标模仿。")
-        lines.append(f"")
-        lines.append(f"| 排名 | 账号 | 描述 | 播放 | 点赞 | 评论 | FinalScore | 商业意图 | 采购意向占比 | 等级 |")
-        lines.append(f"|------|------|------|------|------|------|-----------|----------|------------|------|")
-        for v in reference_videos:
-            desc = (v.get("desc") or "")[:50].replace("|", "/")
+    # ── 涉及账号概览 (辅助参考，置于视频章节之后) ──
+    accounts_sorted_2 = sorted(
+        scraped_data.get("accounts", []),
+        key=lambda x: _safe_num(x.get("reference_value", x.get("follower_count", 0))),
+        reverse=True
+    )
+    lines.append(f"## 📋 涉及账号概览")
+    lines.append(f"")
+    lines.append(f"> 以下为本次分析中涉及的 TikTok 账号（按商业价值排序），供了解内容来源。")
+    lines.append(f"")
+    has_scores_2 = any(
+        a.get("reference_value") is not None or a.get("score") is not None
+        for a in scraped_data.get("accounts", [])
+    )
+    if has_scores_2:
+        lines.append(f"| # | 账号 | 昵称 | 粉丝 | 点赞 | 商业价值分 | 参考视频数 | 简介 |")
+        lines.append(f"|------|------|------|------|------|------------|------------|------|")
+    else:
+        lines.append(f"| # | 账号 | 昵称 | 粉丝 | 点赞 | 简介 |")
+        lines.append(f"|------|------|------|------|------|------|")
+    for i, a in enumerate(accounts_sorted_2[:20], 1):
+        if has_scores_2:
+            rv = a.get("reference_value", a.get("score", "-"))
+            rv_num = _safe_num(rv, -1)
             lines.append(
-                f"| {v.get('reference_rank', '')} | @{v.get('account_username', '')} | {desc} | "
-                f"{_fmt_count(v.get('play_count', 0))} | {_fmt_count(v.get('digg_count', 0))} | "
-                f"{_fmt_count(v.get('comment_count', 0))} | "
-                f"{v.get('final_score', v.get('reference_score', ''))} | "
-                f"{v.get('commercial_intent', '')} | "
-                f"{v.get('purchase_intent_ratio', 0):.1%} | "
-                f"{v.get('tier', v.get('reference_tier', ''))} |"
+                f"| {i} | @{a.get('username', '')} | {a.get('nickname', '')} | "
+                f"{_fmt_count(a.get('follower_count', 0))} | {_fmt_count(a.get('like_count', 0))} | "
+                f"{rv}{'⭐' if rv_num > 60 else ''} | "
+                f"{a.get('reference_video_count', a.get('tier', ''))} | "
+                f"{a.get('bio', '')[:50]} |"
             )
-        lines.append(f"")
+        else:
+            lines.append(
+                f"| {i} | @{a.get('username', '')} | {a.get('nickname', '')} | "
+                f"{_fmt_count(a.get('follower_count', 0))} | {_fmt_count(a.get('like_count', 0))} | "
+                f"{a.get('bio', '')[:50]} |"
+            )
+    lines.append(f"")
 
     # ── 爆款视频 TOP N ──
     viral_videos = [v for v in all_videos if v.get("is_global_top10")]

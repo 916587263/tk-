@@ -2659,9 +2659,10 @@ class TikTokScraper:
         }
 
         await self._emit_progress(
-            f"数据采集完成: {result['total_accounts']} 账号, "
-            f"{result['total_videos']} 视频 (其中 {len(deep_analyzed_videos)} 深度分析), "
-            f"{result['total_comments']} 评论",
+            f"数据采集完成: {result['total_videos']} 条视频 "
+            f"(其中 {len(deep_analyzed_videos)} 条深度分析), "
+            f"来自 {result['total_accounts']} 个账号, "
+            f"{result['total_comments']} 条评论",
             result
         )
 

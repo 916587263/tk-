@@ -1,0 +1,50 @@
+# ============================================================
+# TikTok Analyzer — 启动器配置
+# 所有参数均可选。未设置的字段使用代码默认值。
+# 修改后下次启动自动生效, 无需改代码。
+# ============================================================
+
+# ── 浏览器管理 ──
+browser:
+  # 首选浏览器: "edge" | "chrome" | "auto"
+  preferred: edge
+
+  # CDP 调试端口
+  debug_port: 9222
+
+  # DevTools 就绪超时 (秒)
+  startup_timeout: 15
+
+  # 端口已有 CDP 时是否直接复用 (无需重启)
+  reuse_existing: true
+
+  # 端口被非 CDP 占用时是否自动清理
+  kill_stale: true
+
+  # 创建独立 Profile 目录 (不影响日常浏览器)
+  create_isolated_profile: true
+
+  # 启动浏览器时附加的命令行参数
+  # extra_args:
+  #   - "--disable-extensions"
+  #   - "--incognito"
+
+# ── Web 应用 ──
+app:
+  # Flask 监听地址和端口
+  host: 127.0.0.1
+  port: 5000
+
+  # 启动后是否自动打开系统浏览器
+  open_browser: true
+
+  # 退出时是否保留 CDP 浏览器 (true=不关闭)
+  keep_browser_on_exit: false
+
+# ── 日志 ──
+logging:
+  # 控制台日志级别: DEBUG | INFO | WARNING | ERROR
+  console_level: INFO
+
+  # 文件日志级别 (logs/launcher.log)
+  file_level: DEBUG

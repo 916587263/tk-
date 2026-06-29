@@ -8,11 +8,15 @@ checkpoints/
 logs/
 cookies/
 browser_profile/
+launcher_profile/
 cache/
 proxies.json
 config.yaml
+config/launcher.local.yaml
 .env
 .venv/
 *.egg-info/
 dist/
 *.log
+.deps_checked
+launcher/__pycache__/

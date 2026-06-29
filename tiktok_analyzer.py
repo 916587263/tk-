@@ -168,8 +168,9 @@ async def main():
             comments_video_count=3,
             enrich_top=enrich_top,
         )
-        emit(f"采集完成: {scraped_data['total_accounts']}账号, "
-             f"{scraped_data['total_videos']}视频, {scraped_data['total_comments']}评论")
+        emit(f"采集完成: {scraped_data['total_videos']} 视频 "
+             f"(来自 {scraped_data['total_accounts']} 个账号), "
+             f"{scraped_data['total_comments']} 评论")
 
         all_accounts = scraped_data.get("accounts", [])
         all_videos = scraped_data.get("videos", [])
@@ -329,12 +330,14 @@ async def main():
             if top_references:
                 summaries = []
                 for i, v in enumerate(top_references[:5]):
+                    desc = (v.get('desc') or '')[:60]
                     summaries.append(
-                        f"#{i+1} @{v.get('account_username','')}: "
-                        f"final={v.get('final_score',0):.0f} "
-                        f"(意图={v.get('commercial_intent',0):.0f})"
+                        f"#{i+1} \"{desc}\" "
+                        f"(FinalScore={v.get('final_score',0):.0f}, "
+                        f"意图={v.get('commercial_intent',0):.0f}, "
+                        f"@{v.get('account_username','')})"
                     )
-                emit(f"  对标 Top 5: {' | '.join(summaries)}")
+                emit(f"  对标视频 Top 5: {' | '.join(summaries)}")
 
             # 构建意图摘要 (兼容 LLM 和规则引擎数据源)
             for v in top_references:
@@ -422,9 +425,13 @@ async def main():
         emit(f"报告已导出: {output_dir}")
 
         print(f"\n  完成!")
-        print(f"    {len(all_accounts)}账号 | {len(all_videos)}视频 | {len(all_comments)}评论")
+        print(f"    视频: {len(all_videos)} 条 (其中 {len(top_references)} 条对标参考)")
+        print(f"    账号: {len(all_accounts)} 个 | 评论: {len(all_comments)} 条")
         if top_references:
-            print(f"   {len(top_references)}条对标参考视频 (FinalScore)")
+            print(f"    对标参考视频: {len(top_references)} 条 (FinalScore)")
+            for i, v in enumerate(top_references[:5]):
+                desc = (v.get('desc') or '')[:60]
+                print(f"      #{i+1} \"{desc}\" (FinalScore={v.get('final_score',0):.0f}) @{v.get('account_username','')}")
         if analysis_data:
             print(f"   市场机会评分: {analysis_data.get('market_opportunity_score', 'N/A')}")
         print(f"   报告: {md_file}")
