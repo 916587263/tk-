@@ -118,7 +118,7 @@ TIER_MODIFIERS = {
 class KeywordCache:
     """单文件 JSON 缓存，TTL 7 天"""
 
-    def __init__(self, cache_file: Path | None = None, ttl_days: int = 7):
+    def __init__(self, cache_file: Optional[Path] = None, ttl_days: int = 7):
         self.cache_file = cache_file or CACHE_FILE
         self.ttl_days = ttl_days
         self._data: dict = {"entries": {}}
@@ -158,7 +158,7 @@ class KeywordCache:
             logger.info("清理 %d 条过期缓存", len(expired))
             self._save()
 
-    def get(self, keywords: list[str], tier: str) -> dict | None:
+    def get(self, keywords: list[str], tier: str) -> Optional[dict]:
         self._ensure_loaded()
         key = self._make_key(keywords, tier)
         entry = self._data.get("entries", {}).get(key)
@@ -195,8 +195,8 @@ class KeywordExpander:
 
     def __init__(
         self,
-        cache: KeywordCache | None = None,
-        tier_limits: dict | None = None,
+        cache: Optional[KeywordCache] = None,
+        tier_limits: Optional[dict] = None,
     ):
         self.cache = cache
         self.limits = tier_limits or TIER_LIMITS

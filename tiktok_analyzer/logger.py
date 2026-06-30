@@ -6,12 +6,13 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 # 会话级单一日志文件（所有模块共享）
-_session_log_file: str | None = None
+_session_log_file: Optional[str] = None
 
 
 def _get_session_log_file() -> Path:
