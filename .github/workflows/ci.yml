@@ -45,24 +45,17 @@ jobs:
           pip install pytest pytest-asyncio pytest-cov
 
       - name: Install Playwright browsers
-        run: |
-          playwright install chromium
-          playwright install-deps chromium
+        run: playwright install chromium
+
+      - name: Install Playwright system deps (Linux only)
+        if: runner.os == 'Linux'
+        run: playwright install-deps chromium
 
       - name: Prepare config
-        run: |
-          cp config.example.yaml config.yaml
-          cp .env.example .env
+        run: python -c "import shutil; shutil.copy('config.example.yaml', 'config.yaml'); shutil.copy('.env.example', '.env')"
 
       - name: Run unit tests
-        run: |
-          python -m pytest tests/ \
-            -v --tb=short \
-            --ignore=tests/test_pipeline_e2e.py \
-            --ignore=tests/diagnose_issue13.py \
-            --timeout=60 \
-            -k "not e2e and not cdp" \
-            || echo "::warning::部分测试需要真实 TikTok 环境，预期会跳过"
+        run: python -m pytest tests/ -v --tb=short --ignore=tests/test_pipeline_e2e.py --ignore=tests/diagnose_issue13.py --timeout=60 -k "not e2e and not cdp" || echo "::warning::部分测试需要真实 TikTok 环境，预期会跳过"
 
       - name: Run import check
         run: |
@@ -106,8 +99,7 @@ jobs:
       - name: Mypy — 类型检查 (宽松模式)
         run: |
           pip install -r requirements.txt
-          mypy tiktok_analyzer/ --ignore-missing-imports --no-error-summary \
-            || echo "::warning::类型检查发现问题 (非阻塞)"
+          mypy tiktok_analyzer/ --ignore-missing-imports --no-error-summary || echo "::warning::类型检查发现问题 (非阻塞)"
 
   # ──────────── 安全扫描 ────────────
   security:
